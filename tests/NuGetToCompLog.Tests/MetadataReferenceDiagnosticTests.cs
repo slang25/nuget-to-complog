@@ -13,7 +13,7 @@ namespace NuGetToCompLog.Tests;
 /// </summary>
 public class MetadataReferenceDiagnosticTests
 {
-    [Fact(Skip = "Diagnostic test - run manually to inspect real PDB format")]
+    [Fact]
     public async Task InspectRealMetadataReferenceFormat()
     {
         // Download and extract Newtonsoft.Json

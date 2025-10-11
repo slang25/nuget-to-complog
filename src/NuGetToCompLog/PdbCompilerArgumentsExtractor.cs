@@ -152,9 +152,9 @@ public class PdbCompilerArgumentsExtractor
             // CompilationMetadataReferences GUID: {7E4D4708-096E-4C5C-AEDA-CB10BA6A740D}
             if (guid.ToString().Equals("7E4D4708-096E-4C5C-AEDA-CB10BA6A740D", StringComparison.OrdinalIgnoreCase))
             {
-                var blob = metadataReader.GetBlobBytes(cdi.Value);
+                var blobReader = metadataReader.GetBlobReader(cdi.Value);
                 AnsiConsole.MarkupLine("[yellow]Metadata References:[/]");
-                ParseMetadataReferences(blob);
+                ParseMetadataReferences(blobReader);
                 AnsiConsole.WriteLine();
             }
         }
@@ -225,11 +225,11 @@ public class PdbCompilerArgumentsExtractor
         return options.Split('\0', StringSplitOptions.RemoveEmptyEntries);
     }
 
-    private void ParseMetadataReferences(byte[] blob)
+    private void ParseMetadataReferences(BlobReader blobReader)
     {
         try
         {
-            var references = MetadataReferenceParser.Parse(blob);
+            var references = MetadataReferenceParser.Parse(blobReader);
             
             var refsTable = new Table()
                 .BorderColor(Color.Grey)
