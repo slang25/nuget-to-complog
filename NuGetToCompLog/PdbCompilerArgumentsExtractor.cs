@@ -1,5 +1,6 @@
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
+using System.IO.Compression;
 using Spectre.Console;
 
 namespace NuGetToCompLog;
@@ -25,9 +26,10 @@ public class PdbCompilerArgumentsExtractor
         // Try three approaches to find the PDB:
         // 1. Embedded PDB in the assembly
         // 2. External PDB file next to the assembly
-        // 3. External PDB in symbols package
+        // 3. External PDB in symbols package (download if necessary)
 
         string? pdbPath = null;
+        string? pdbFileName = null;
 
         // Check for embedded PDB
         using (var peStream = File.OpenRead(assemblyPath))
@@ -50,11 +52,30 @@ public class PdbCompilerArgumentsExtractor
             if (codeView.DataSize > 0)
             {
                 var codeViewData = peReader.ReadCodeViewDebugDirectoryData(codeView);
-                var pdbFileName = codeViewData.Path;
+                pdbFileName = codeViewData.Path;
                 AnsiConsole.MarkupLine($"  [dim]→ PDB reference: {pdbFileName}[/]");
 
                 // Try to find the PDB file
                 pdbPath = FindExternalPdb(assemblyPath, pdbFileName, workingDirectory);
+            }
+        }
+
+        // If we still don't have a PDB, try downloading the symbols package
+        if (pdbPath == null && pdbFileName != null)
+        {
+            var symbolsDir = Path.Combine(workingDirectory, "symbols");
+            
+            // Check if symbols directory already exists (might have been downloaded by orchestrator)
+            if (!Directory.Exists(symbolsDir) || Directory.GetFiles(symbolsDir, "*.pdb", SearchOption.AllDirectories).Length == 0)
+            {
+                AnsiConsole.MarkupLine("  [dim]→ Attempting to download symbols package...[/]");
+                var snupkgDownloaded = await TryDownloadSymbolsPackageAsync(assemblyPath, workingDirectory);
+                
+                if (snupkgDownloaded)
+                {
+                    // Try to find the PDB again after downloading symbols
+                    pdbPath = FindExternalPdb(assemblyPath, pdbFileName, workingDirectory);
+                }
             }
         }
 
@@ -155,9 +176,13 @@ public class PdbCompilerArgumentsExtractor
             // Check for embedded source
             var embeddedSource = metadataReader.GetCustomDebugInformation(docHandle)
                 .Select(h => metadataReader.GetCustomDebugInformation(h))
-                .FirstOrDefault(cdi => metadataReader.GetGuid(cdi.Kind).ToString().Equals("0E8A571B-6926-466E-B4AD-8AB04611F5FE", StringComparison.OrdinalIgnoreCase));
+                .Where(
+                    cdi => metadataReader.GetGuid(cdi.Kind).ToString().Equals("0E8A571B-6926-466E-B4AD-8AB04611F5FE",
+                        StringComparison.OrdinalIgnoreCase))
+                .Cast<CustomDebugInformation?>()
+                .FirstOrDefault();
 
-            if (embeddedSource.Kind != default)
+            if (embeddedSource.HasValue && !(embeddedSource.Value.Kind != default))
             {
                 sourceFilesTree.AddNode($"[green]{name}[/] [dim](embedded)[/]");
             }
@@ -300,5 +325,103 @@ public class PdbCompilerArgumentsExtractor
         }
 
         return null;
+    }
+
+    private async Task<bool> TryDownloadSymbolsPackageAsync(string assemblyPath, string workingDirectory)
+    {
+        try
+        {
+            // Extract package info from the assembly path
+            // Path is typically: workingDirectory/extracted/lib/netX.X/PackageName.dll
+            var extractedDir = Path.Combine(workingDirectory, "extracted");
+            if (!assemblyPath.StartsWith(extractedDir))
+            {
+                return false; // Not from a NuGet package
+            }
+
+            // Try to find the .nuspec file to get package ID and version
+            var nuspecFiles = Directory.GetFiles(extractedDir, "*.nuspec", SearchOption.TopDirectoryOnly);
+            if (nuspecFiles.Length == 0)
+            {
+                return false;
+            }
+
+            var nuspecPath = nuspecFiles[0];
+            var (packageId, version) = ParseNuspecFile(nuspecPath);
+            
+            if (string.IsNullOrEmpty(packageId) || string.IsNullOrEmpty(version))
+            {
+                return false;
+            }
+
+            AnsiConsole.MarkupLine($"    [dim]Trying to download {packageId}.{version}.snupkg...[/]");
+
+            // Try multiple symbol package sources
+            var snupkgUrls = new[]
+            {
+                $"https://www.nuget.org/api/v2/symbolpackage/{packageId}/{version}",
+                $"https://api.nuget.org/v3-flatcontainer/{packageId.ToLowerInvariant()}/{version.ToLowerInvariant()}/{packageId.ToLowerInvariant()}.{version.ToLowerInvariant()}.snupkg",
+                $"https://globalcdn.nuget.org/packages/{packageId.ToLowerInvariant()}.{version.ToLowerInvariant()}.snupkg",
+            };
+
+            using var httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true });
+            httpClient.Timeout = TimeSpan.FromSeconds(30);
+
+            foreach (var snupkgUrl in snupkgUrls)
+            {
+                try
+                {
+                    var response = await httpClient.GetAsync(snupkgUrl);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var snupkgPath = Path.Combine(workingDirectory, $"{packageId}.{version}.snupkg");
+                        using (var fileStream = File.Create(snupkgPath))
+                        {
+                            await response.Content.CopyToAsync(fileStream);
+                        }
+
+                        // Extract the symbols package
+                        var symbolsDir = Path.Combine(workingDirectory, "symbols");
+                        Directory.CreateDirectory(symbolsDir);
+                        ZipFile.ExtractToDirectory(snupkgPath, symbolsDir, overwriteFiles: true);
+
+                        var pdbCount = Directory.GetFiles(symbolsDir, "*.pdb", SearchOption.AllDirectories).Length;
+                        AnsiConsole.MarkupLine($"    [green]✓ Downloaded and extracted symbols package ({pdbCount} PDB files)[/]");
+                        return true;
+                    }
+                }
+                catch
+                {
+                    // Try next URL
+                }
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private (string packageId, string version) ParseNuspecFile(string nuspecPath)
+    {
+        try
+        {
+            var doc = System.Xml.Linq.XDocument.Load(nuspecPath);
+            var ns = doc.Root?.Name.Namespace;
+            if (ns == null) return ("", "");
+            
+            var metadata = doc.Root?.Element(ns + "metadata");
+            
+            var packageId = metadata?.Element(ns + "id")?.Value ?? "";
+            var version = metadata?.Element(ns + "version")?.Value ?? "";
+            
+            return (packageId, version);
+        }
+        catch
+        {
+            return ("", "");
+        }
     }
 }

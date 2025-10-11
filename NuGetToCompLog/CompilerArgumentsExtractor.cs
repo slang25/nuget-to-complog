@@ -87,7 +87,7 @@ public class CompilerArgumentsExtractor
                 await AnsiConsole.Status()
                     .Spinner(Spinner.Known.Dots)
                     .SpinnerStyle(Style.Parse("yellow"))
-                    .StartAsync("Attempting to download symbols package...", async ctx =>
+                    .StartAsync("Attempting to download symbols package (.snupkg)...", async ctx =>
                     {
                         snupkgPath = await DownloadSymbolsPackageAsync(packageId, version);
                     });
@@ -98,17 +98,25 @@ public class CompilerArgumentsExtractor
                     ExtractPackage(snupkgPath, symbolsExtractPath);
                     
                     var pdbs = Directory.GetFiles(symbolsExtractPath, "*.pdb", SearchOption.AllDirectories);
-                    var symbolsTree = new Tree($"[green]✓ Downloaded symbols package[/]");
-                    foreach (var pdb in pdbs)
+                    if (pdbs.Length > 0)
                     {
-                        symbolsTree.AddNode($"[blue]{Path.GetRelativePath(symbolsExtractPath, pdb)}[/]");
+                        var symbolsTree = new Tree($"[green]✓ Downloaded symbols package with {pdbs.Length} PDB file(s)[/]");
+                        foreach (var pdb in pdbs)
+                        {
+                            symbolsTree.AddNode($"[blue]{Path.GetRelativePath(symbolsExtractPath, pdb)}[/]");
+                        }
+                        AnsiConsole.Write(symbolsTree);
                     }
-                    AnsiConsole.Write(symbolsTree);
+                    else
+                    {
+                        AnsiConsole.MarkupLine("[green]✓[/] Downloaded symbols package (no PDB files found inside)");
+                    }
                     AnsiConsole.WriteLine();
                 }
                 else
                 {
-                    AnsiConsole.MarkupLine("[yellow]⚠[/] Symbols package (.snupkg) not found");
+                    AnsiConsole.MarkupLine("[yellow]⚠[/] Symbols package (.snupkg) not available for this package");
+                    AnsiConsole.MarkupLine("   [dim]Note: Not all packages publish symbol packages to NuGet.org[/]");
                     AnsiConsole.WriteLine();
                 }
             }
@@ -263,24 +271,34 @@ public class CompilerArgumentsExtractor
         // Try to download the .snupkg file
         var snupkgPath = Path.Combine(_workingDirectory, $"{packageId}.{version}.snupkg");
         
-        // Note: The NuGet client doesn't have direct support for .snupkg downloads
-        // We need to construct the URL manually
-        var snupkgUrl = $"https://api.nuget.org/v3-flatcontainer/{packageId.ToLowerInvariant()}/{version.ToNormalizedString()}/{packageId.ToLowerInvariant()}.{version.ToNormalizedString()}.snupkg";
+        // Try multiple symbol package sources
+        var snupkgUrls = new[]
+        {
+            // Primary NuGet feed (v3-flatcontainer)
+            $"https://api.nuget.org/v3-flatcontainer/{packageId.ToLowerInvariant()}/{version.ToNormalizedString()}/{packageId.ToLowerInvariant()}.{version.ToNormalizedString()}.snupkg",
+            // Alternative: globalpackages cache format (some packages use this)
+            $"https://globalcdn.nuget.org/packages/{packageId.ToLowerInvariant()}.{version.ToNormalizedString()}.snupkg",
+        };
 
         using var httpClient = new HttpClient();
-        try
+        httpClient.Timeout = TimeSpan.FromSeconds(30);
+        
+        foreach (var snupkgUrl in snupkgUrls)
         {
-            var response = await httpClient.GetAsync(snupkgUrl);
-            if (response.IsSuccessStatusCode)
+            try
             {
-                using var fileStream = File.Create(snupkgPath);
-                await response.Content.CopyToAsync(fileStream);
-                return snupkgPath;
+                var response = await httpClient.GetAsync(snupkgUrl);
+                if (response.IsSuccessStatusCode)
+                {
+                    using var fileStream = File.Create(snupkgPath);
+                    await response.Content.CopyToAsync(fileStream);
+                    return snupkgPath;
+                }
             }
-        }
-        catch
-        {
-            // Symbols package doesn't exist
+            catch
+            {
+                // Try next URL
+            }
         }
 
         return null;
