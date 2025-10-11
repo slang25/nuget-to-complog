@@ -227,56 +227,35 @@ public class PdbCompilerArgumentsExtractor
 
     private void ParseMetadataReferences(byte[] blob)
     {
-        // Metadata references are stored in a custom binary format
-        // This is a simplified parser - the actual format is more complex
-        // Format: count (4 bytes), then for each reference:
-        //   - file name length (4 bytes)
-        //   - file name (UTF-8)
-        //   - extern alias count (4 bytes)
-        //   - extern aliases...
-        //   - properties (embed interop types, etc.)
-        
-        using var stream = new MemoryStream(blob);
-        using var reader = new BinaryReader(stream);
-
         try
         {
-            int count = reader.ReadInt32();
+            var references = MetadataReferenceParser.Parse(blob);
             
             var refsTable = new Table()
                 .BorderColor(Color.Grey)
                 .AddColumn("[dim]#[/]")
                 .AddColumn("[cyan]Reference[/]")
-                .AddColumn("[yellow]Aliases[/]");
+                .AddColumn("[yellow]Aliases[/]")
+                .AddColumn("[dim]Properties[/]");
 
-            for (int i = 0; i < count && i < 50; i++) // Limit to 50 for display
+            int displayCount = Math.Min(references.Count, 50);
+            for (int i = 0; i < displayCount; i++)
             {
-                int fileNameLength = reader.ReadInt32();
-                var fileName = System.Text.Encoding.UTF8.GetString(reader.ReadBytes(fileNameLength));
-                
-                // Read extern aliases count
-                int aliasCount = reader.ReadInt32();
-                var aliases = new List<string>();
-                for (int j = 0; j < aliasCount; j++)
-                {
-                    int aliasLength = reader.ReadInt32();
-                    var alias = System.Text.Encoding.UTF8.GetString(reader.ReadBytes(aliasLength));
-                    aliases.Add(alias);
-                }
-
+                var reference = references[i];
                 refsTable.AddRow(
                     $"[dim]{i + 1}[/]",
-                    $"[cyan]{Path.GetFileName(fileName)}[/]",
-                    aliases.Count > 0 ? string.Join(", ", aliases) : "[dim]-[/]"
+                    $"[cyan]{Path.GetFileName(reference.FileName)}[/]",
+                    reference.Aliases.Count > 0 ? string.Join(", ", reference.Aliases) : "[dim]-[/]",
+                    $"[dim]Embed: {reference.EmbedInteropTypes}[/]"
                 );
             }
 
             AnsiConsole.Write(refsTable);
-            if (count > 50)
+            if (references.Count > 50)
             {
-                AnsiConsole.MarkupLine($"[dim]... and {count - 50} more references[/]");
+                AnsiConsole.MarkupLine($"[dim]... and {references.Count - 50} more references[/]");
             }
-            AnsiConsole.MarkupLine($"  [dim]Total: {count} references[/]");
+            AnsiConsole.MarkupLine($"  [dim]Total: {references.Count} references[/]");
 
             // TODO: For complog creation, we need to:
             // 1. Identify which references are framework assemblies vs NuGet packages
