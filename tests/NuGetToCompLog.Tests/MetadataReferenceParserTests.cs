@@ -1,3 +1,4 @@
+using System.Reflection.Metadata;
 using NuGetToCompLog;
 
 namespace NuGetToCompLog.Tests;
@@ -20,8 +21,9 @@ public class MetadataReferenceParserTests
         // Assert
         Assert.Single(references);
         Assert.Equal("System.Runtime.dll", references[0].FileName);
-        Assert.Empty(references[0].Aliases);
+        Assert.Empty(references[0].ExternAliases);
         Assert.False(references[0].EmbedInteropTypes);
+        Assert.Equal(MetadataImageKind.Assembly, references[0].Kind);
     }
 
     [Fact]
@@ -60,11 +62,11 @@ public class MetadataReferenceParserTests
 
         // Assert
         Assert.Equal(2, references.Count);
-        Assert.Single(references[0].Aliases);
-        Assert.Equal("global", references[0].Aliases[0]);
-        Assert.Equal(2, references[1].Aliases.Count);
-        Assert.Equal("mylib", references[1].Aliases[0]);
-        Assert.Equal("lib2", references[1].Aliases[1]);
+        Assert.Single(references[0].ExternAliases);
+        Assert.Equal("global", references[0].ExternAliases[0]);
+        Assert.Equal(2, references[1].ExternAliases.Count);
+        Assert.Equal("mylib", references[1].ExternAliases[0]);
+        Assert.Equal("lib2", references[1].ExternAliases[1]);
     }
 
     [Fact]
@@ -124,76 +126,41 @@ public class MetadataReferenceParserTests
     }
 
     /// <summary>
-    /// Helper method to create a properly formatted metadata reference blob.
+    /// Helper method to create a properly formatted metadata reference blob using BlobBuilder.
     /// </summary>
     private byte[] CreateMetadataReferenceBlob((string fileName, string[] aliases, bool embedInteropTypes)[] references)
     {
-        using var stream = new MemoryStream();
-        using var writer = new BinaryWriter(stream);
+        var builder = new BlobBuilder();
 
-        // No count prefix - just write references sequentially
         foreach (var (fileName, aliases, embedInteropTypes) in references)
         {
-            // Write file name (serialized string)
-            WriteSerializedString(writer, fileName);
+            // Write file name (null-terminated UTF-8 string)
+            builder.WriteUTF8(fileName);
+            builder.WriteByte(0); // null terminator
 
-            // Write alias count and aliases
-            WriteCompressedInteger(writer, aliases.Length);
-            foreach (var alias in aliases)
-            {
-                WriteSerializedString(writer, alias);
-            }
+            // Write extern aliases (null-terminated UTF-8 string, comma-separated)
+            var aliasesStr = aliases.Length > 0 ? string.Join(",", aliases) : "";
+            builder.WriteUTF8(aliasesStr);
+            builder.WriteByte(0); // null terminator
 
-            // Write properties byte
-            byte properties = embedInteropTypes ? (byte)0x01 : (byte)0x00;
-            writer.Write(properties);
+            // Write EmbedInteropTypes/MetadataImageKind byte
+            // Bit 0: Kind (0=Module, 1=Assembly)
+            // Bit 1: EmbedInteropTypes
+            byte kindAndEmbed = 0b01; // Assembly by default
+            if (embedInteropTypes)
+                kindAndEmbed |= 0b10;
+            builder.WriteByte(kindAndEmbed);
             
-            // Write MVID (16 bytes - all zeros for test)
-            writer.Write(new byte[16]);
+            // Write timestamp (4 bytes)
+            builder.WriteInt32(0);
             
-            // Write timestamp (4 bytes - zero for test)
-            writer.Write((int)0);
+            // Write image size (4 bytes)
+            builder.WriteInt32(0);
+            
+            // Write MVID (16 bytes)
+            builder.WriteGuid(Guid.Empty);
         }
 
-        return stream.ToArray();
-    }
-
-    private void WriteCompressedInteger(BinaryWriter writer, int value)
-    {
-        if (value < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(value));
-        }
-
-        // Single-byte encoding: 0-127
-        if (value <= 0x7F)
-        {
-            writer.Write((byte)value);
-        }
-        // Two-byte encoding: 128-16383
-        else if (value <= 0x3FFF)
-        {
-            writer.Write((byte)(0x80 | (value >> 8)));
-            writer.Write((byte)(value & 0xFF));
-        }
-        // Four-byte encoding: 16384-536870911
-        else if (value <= 0x1FFFFFFF)
-        {
-            writer.Write((byte)(0xC0 | (value >> 24)));
-            writer.Write((byte)((value >> 16) & 0xFF));
-            writer.Write((byte)((value >> 8) & 0xFF));
-            writer.Write((byte)(value & 0xFF));
-        }
-        else
-        {
-            throw new ArgumentOutOfRangeException(nameof(value), "Value too large for compressed integer");
-        }
-    }
-
-    private void WriteSerializedString(BinaryWriter writer, string value)
-    {
-        var bytes = System.Text.Encoding.UTF8.GetBytes(value);
-        WriteCompressedInteger(writer, bytes.Length);
-        writer.Write(bytes);
+        return builder.ToArray();
     }
 }

@@ -45,7 +45,7 @@ public class PdbCompilerArgumentsExtractorIntegrationTests
         Assert.Equal("System.Runtime.dll", references[0].FileName);
         Assert.Equal("System.Collections.dll", references[1].FileName);
         Assert.Equal("System.Linq.dll", references[2].FileName);
-        Assert.Contains("global", references[3].Aliases);
+        Assert.Contains("global", references[3].ExternAliases);
         Assert.True(references[4].EmbedInteropTypes);
     }
 
@@ -54,33 +54,36 @@ public class PdbCompilerArgumentsExtractorIntegrationTests
     /// </summary>
     private byte[] CreateTestMetadataReferenceBlob()
     {
-        using var stream = new MemoryStream();
-        using var writer = new BinaryWriter(stream);
-
-        // No count prefix - just write references
+        var builder = new BlobBuilder();
 
         // Reference 1: System.Runtime.dll (no aliases, no embed)
-        WriteSerializedString(writer, "System.Runtime.dll");
-        WriteCompressedInteger(writer, 0); // no aliases
-        writer.Write((byte)0x00); // no embed
-        writer.Write(new byte[16]); // MVID
-        writer.Write((int)0); // timestamp
+        builder.WriteUTF8("System.Runtime.dll");
+        builder.WriteByte(0); // null terminator
+        builder.WriteByte(0); // empty aliases, null terminator
+        builder.WriteByte(0b01); // Assembly, no embed
+        builder.WriteInt32(0); // timestamp
+        builder.WriteInt32(0); // image size
+        builder.WriteGuid(Guid.Empty); // MVID
 
         // Reference 2: System.Collections.dll (no aliases, no embed)
-        WriteSerializedString(writer, "System.Collections.dll");
-        WriteCompressedInteger(writer, 0);
-        writer.Write((byte)0x00);
-        writer.Write(new byte[16]);
-        writer.Write((int)0);
+        builder.WriteUTF8("System.Collections.dll");
+        builder.WriteByte(0);
+        builder.WriteByte(0);
+        builder.WriteByte(0b01);
+        builder.WriteInt32(0);
+        builder.WriteInt32(0);
+        builder.WriteGuid(Guid.Empty);
 
         // Reference 3: Newtonsoft.Json.dll (no aliases, no embed)
-        WriteSerializedString(writer, "Newtonsoft.Json.dll");
-        WriteCompressedInteger(writer, 0);
-        writer.Write((byte)0x00);
-        writer.Write(new byte[16]);
-        writer.Write((int)0);
+        builder.WriteUTF8("Newtonsoft.Json.dll");
+        builder.WriteByte(0);
+        builder.WriteByte(0);
+        builder.WriteByte(0b01);
+        builder.WriteInt32(0);
+        builder.WriteInt32(0);
+        builder.WriteGuid(Guid.Empty);
 
-        return stream.ToArray();
+        return builder.ToArray();
     }
 
     /// <summary>
@@ -88,83 +91,54 @@ public class PdbCompilerArgumentsExtractorIntegrationTests
     /// </summary>
     private byte[] CreateComplexMetadataReferenceBlob()
     {
-        using var stream = new MemoryStream();
-        using var writer = new BinaryWriter(stream);
-
-        // No count prefix - just write references
+        var builder = new BlobBuilder();
 
         // Reference 1: Simple
-        WriteSerializedString(writer, "System.Runtime.dll");
-        WriteCompressedInteger(writer, 0);
-        writer.Write((byte)0x00);
-        writer.Write(new byte[16]);
-        writer.Write((int)0);
+        builder.WriteUTF8("System.Runtime.dll");
+        builder.WriteByte(0);
+        builder.WriteByte(0);
+        builder.WriteByte(0b01);
+        builder.WriteInt32(0);
+        builder.WriteInt32(0);
+        builder.WriteGuid(Guid.Empty);
 
         // Reference 2: Simple
-        WriteSerializedString(writer, "System.Collections.dll");
-        WriteCompressedInteger(writer, 0);
-        writer.Write((byte)0x00);
-        writer.Write(new byte[16]);
-        writer.Write((int)0);
+        builder.WriteUTF8("System.Collections.dll");
+        builder.WriteByte(0);
+        builder.WriteByte(0);
+        builder.WriteByte(0b01);
+        builder.WriteInt32(0);
+        builder.WriteInt32(0);
+        builder.WriteGuid(Guid.Empty);
 
         // Reference 3: Simple
-        WriteSerializedString(writer, "System.Linq.dll");
-        WriteCompressedInteger(writer, 0);
-        writer.Write((byte)0x00);
-        writer.Write(new byte[16]);
-        writer.Write((int)0);
+        builder.WriteUTF8("System.Linq.dll");
+        builder.WriteByte(0);
+        builder.WriteByte(0);
+        builder.WriteByte(0b01);
+        builder.WriteInt32(0);
+        builder.WriteInt32(0);
+        builder.WriteGuid(Guid.Empty);
 
         // Reference 4: With alias
-        WriteSerializedString(writer, "CustomLib.dll");
-        WriteCompressedInteger(writer, 1);
-        WriteSerializedString(writer, "global");
-        writer.Write((byte)0x00);
-        writer.Write(new byte[16]);
-        writer.Write((int)0);
+        builder.WriteUTF8("CustomLib.dll");
+        builder.WriteByte(0);
+        builder.WriteUTF8("global");
+        builder.WriteByte(0);
+        builder.WriteByte(0b01);
+        builder.WriteInt32(0);
+        builder.WriteInt32(0);
+        builder.WriteGuid(Guid.Empty);
 
         // Reference 5: With embed interop types
-        WriteSerializedString(writer, "Interop.Office.dll");
-        WriteCompressedInteger(writer, 0);
-        writer.Write((byte)0x01); // embed interop types
-        writer.Write(new byte[16]);
-        writer.Write((int)0);
+        builder.WriteUTF8("Interop.Office.dll");
+        builder.WriteByte(0);
+        builder.WriteByte(0);
+        builder.WriteByte(0b11); // Assembly + embed interop types
+        builder.WriteInt32(0);
+        builder.WriteInt32(0);
+        builder.WriteGuid(Guid.Empty);
 
-        return stream.ToArray();
-    }
-
-    private void WriteCompressedInteger(BinaryWriter writer, int value)
-    {
-        if (value < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(value));
-        }
-
-        if (value <= 0x7F)
-        {
-            writer.Write((byte)value);
-        }
-        else if (value <= 0x3FFF)
-        {
-            writer.Write((byte)(0x80 | (value >> 8)));
-            writer.Write((byte)(value & 0xFF));
-        }
-        else if (value <= 0x1FFFFFFF)
-        {
-            writer.Write((byte)(0xC0 | (value >> 24)));
-            writer.Write((byte)((value >> 16) & 0xFF));
-            writer.Write((byte)((value >> 8) & 0xFF));
-            writer.Write((byte)(value & 0xFF));
-        }
-        else
-        {
-            throw new ArgumentOutOfRangeException(nameof(value));
-        }
-    }
-
-    private void WriteSerializedString(BinaryWriter writer, string value)
-    {
-        var bytes = System.Text.Encoding.UTF8.GetBytes(value);
-        WriteCompressedInteger(writer, bytes.Length);
-        writer.Write(bytes);
+        return builder.ToArray();
     }
 }

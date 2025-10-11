@@ -236,6 +236,7 @@ public class PdbCompilerArgumentsExtractor
                 .AddColumn("[dim]#[/]")
                 .AddColumn("[cyan]Reference[/]")
                 .AddColumn("[yellow]Aliases[/]")
+                .AddColumn("[dim]Kind[/]")
                 .AddColumn("[dim]Properties[/]");
 
             int displayCount = Math.Min(references.Count, 50);
@@ -245,7 +246,8 @@ public class PdbCompilerArgumentsExtractor
                 refsTable.AddRow(
                     $"[dim]{i + 1}[/]",
                     $"[cyan]{Path.GetFileName(reference.FileName)}[/]",
-                    reference.Aliases.Count > 0 ? string.Join(", ", reference.Aliases) : "[dim]-[/]",
+                    reference.ExternAliases.Count > 0 ? string.Join(", ", reference.ExternAliases) : "[dim]-[/]",
+                    $"[dim]{reference.Kind}[/]",
                     $"[dim]Embed: {reference.EmbedInteropTypes}[/]"
                 );
             }
