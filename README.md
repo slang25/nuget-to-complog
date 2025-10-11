@@ -129,6 +129,7 @@ dotnet run -- <package-id> [version]
 - **NuGet.Protocol** - For downloading packages from nuget.org
 - **System.Reflection.Metadata** - For reading portable PDB files
 - **System.IO.Compression** - For extracting .nupkg/.snupkg files
+- **Spectre.Console** - For beautiful, rich console output
 
 ## Example Output
 

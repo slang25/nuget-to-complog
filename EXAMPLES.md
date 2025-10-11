@@ -18,23 +18,40 @@ dotnet run -- Newtonsoft.Json
 
 **Output:**
 ```
-Processing package: Newtonsoft.Json (latest)
+  _   _            ____          _       _                ____                               _                     
+ | \ | |  _   _   / ___|   ___  | |_    | |_    ___      / ___|   ___    _ __ ___    _ __   | |       ___     __ _ 
+ |  \| | | | | | | |  _   / _ \ | __|   | __|  / _ \    | |      / _ \  | '_ ` _ \  | '_ \  | |      / _ \   / _` |
+ | |\  | | |_| | | |_| | |  __/ | |_    | |_  | (_) |   | |___  | (_) | | | | | | | | |_) | | |___  | (_) | | (_| |
+ |_| \_|  \__,_|  \____|  \___|  \__|    \__|  \___/     \____|  \___/  |_| |_| |_| | .__/  |_____|  \___/   \__, |
+                                                                                    |_|                      |___/ 
+
+┌─Processing Package─────┐
+│ Newtonsoft.Json 13.0.3 │
+└────────────────────────┘
 Working directory: /tmp/nuget-to-complog/...
 
-Latest version: 13.0.3
-✓ Downloaded package to: /tmp/.../Newtonsoft.Json.13.0.3.nupkg
-✓ Extracted package to: /tmp/.../extracted
-✓ Found 8 assemblies:
-  - lib/netstandard1.0/Newtonsoft.Json.dll
-  - lib/net35/Newtonsoft.Json.dll
-  - lib/netstandard2.0/Newtonsoft.Json.dll
-  - lib/net6.0/Newtonsoft.Json.dll
+⠋ Downloading package...
+✓ Downloaded package to: Newtonsoft.Json.13.0.3.nupkg
+✓ Extracted package
+
+Found 8 assemblies
+├── netstandard1.0 / Newtonsoft.Json.dll
+├── net35 / Newtonsoft.Json.dll
+├── netstandard2.0 / Newtonsoft.Json.dll
+├── net6.0 / Newtonsoft.Json.dll
   ...
 
-Attempting to download symbols package (.snupkg)...
 ⚠ Symbols package (.snupkg) not found
 ...
 ```
+
+The output now includes:
+- **FIGlet banner** with the tool name
+- **Colored tables** for structured information
+- **Tree views** for hierarchical data
+- **Panels** for grouping related information
+- **Progress spinners** for long-running operations
+- **Color-coded status** (green for success, yellow for warnings, etc.)
 
 ### Example 2: Analyze Specific Version
 

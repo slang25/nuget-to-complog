@@ -2,6 +2,7 @@ using NuGet.Common;
 using NuGet.Protocol;
 using NuGet.Protocol.Core.Types;
 using NuGet.Versioning;
+using Spectre.Console;
 using System.IO.Compression;
 
 namespace NuGetToCompLog;
@@ -36,126 +37,153 @@ public class CompilerArgumentsExtractor
 
     public async Task ProcessPackageAsync(string packageId, string? version)
     {
-        Console.WriteLine($"Processing package: {packageId} {version ?? "(latest)"}");
-        Console.WriteLine($"Working directory: {_workingDirectory}");
-        Console.WriteLine();
+        var panel = new Panel($"[cyan]{packageId}[/] {(version != null ? $"[yellow]{version}[/]" : "[dim](latest)[/]")}")
+            .Header("[yellow]Processing Package[/]")
+            .BorderColor(Color.Cyan1);
+        AnsiConsole.Write(panel);
+        
+        AnsiConsole.MarkupLine($"[dim]Working directory: {_workingDirectory}[/]");
+        AnsiConsole.WriteLine();
 
         try
         {
             // Step 1: Download the NuGet package
-            var packagePath = await DownloadPackageAsync(packageId, version);
-            Console.WriteLine($"✓ Downloaded package to: {packagePath}");
-            Console.WriteLine();
+            string packagePath = string.Empty;
+            await AnsiConsole.Status()
+                .Spinner(Spinner.Known.Dots)
+                .SpinnerStyle(Style.Parse("cyan"))
+                .StartAsync("Downloading package...", async ctx =>
+                {
+                    packagePath = await DownloadPackageAsync(packageId, version);
+                });
+            
+            AnsiConsole.MarkupLine($"[green]✓[/] Downloaded package to: [dim]{Path.GetFileName(packagePath)}[/]");
+            AnsiConsole.WriteLine();
 
             // Step 2: Extract the package
             var extractPath = Path.Combine(_workingDirectory, "extracted");
             ExtractPackage(packagePath, extractPath);
-            Console.WriteLine($"✓ Extracted package to: {extractPath}");
-            Console.WriteLine();
+            AnsiConsole.MarkupLine($"[green]✓[/] Extracted package");
+            AnsiConsole.WriteLine();
 
             // Step 3: Find assemblies in the package
             var assemblies = FindAssemblies(extractPath);
-            Console.WriteLine($"✓ Found {assemblies.Count} assemblies:");
+            
+            var assemblyTree = new Tree($"[green]Found {assemblies.Count} assemblies[/]");
             foreach (var assembly in assemblies)
             {
-                Console.WriteLine($"  - {Path.GetRelativePath(extractPath, assembly)}");
+                var relativePath = Path.GetRelativePath(extractPath, assembly);
+                var parts = relativePath.Split(Path.DirectorySeparatorChar);
+                var framework = parts.Length > 1 ? parts[1] : "unknown";
+                assemblyTree.AddNode($"[cyan]{framework}[/] / [yellow]{Path.GetFileName(assembly)}[/]");
             }
-            Console.WriteLine();
+            AnsiConsole.Write(assemblyTree);
+            AnsiConsole.WriteLine();
 
             // Step 4: Try to download symbols package (snupkg)
             string? snupkgPath = null;
             try
             {
-                Console.WriteLine("Attempting to download symbols package (.snupkg)...");
-                snupkgPath = await DownloadSymbolsPackageAsync(packageId, version);
+                await AnsiConsole.Status()
+                    .Spinner(Spinner.Known.Dots)
+                    .SpinnerStyle(Style.Parse("yellow"))
+                    .StartAsync("Attempting to download symbols package...", async ctx =>
+                    {
+                        snupkgPath = await DownloadSymbolsPackageAsync(packageId, version);
+                    });
+                
                 if (snupkgPath != null)
                 {
                     var symbolsExtractPath = Path.Combine(_workingDirectory, "symbols");
                     ExtractPackage(snupkgPath, symbolsExtractPath);
-                    Console.WriteLine($"✓ Downloaded and extracted symbols package to: {symbolsExtractPath}");
                     
                     var pdbs = Directory.GetFiles(symbolsExtractPath, "*.pdb", SearchOption.AllDirectories);
-                    Console.WriteLine($"  Found {pdbs.Length} PDB files:");
+                    var symbolsTree = new Tree($"[green]✓ Downloaded symbols package[/]");
                     foreach (var pdb in pdbs)
                     {
-                        Console.WriteLine($"    - {Path.GetRelativePath(symbolsExtractPath, pdb)}");
+                        symbolsTree.AddNode($"[blue]{Path.GetRelativePath(symbolsExtractPath, pdb)}[/]");
                     }
-                    Console.WriteLine();
+                    AnsiConsole.Write(symbolsTree);
+                    AnsiConsole.WriteLine();
                 }
                 else
                 {
-                    Console.WriteLine("⚠ Symbols package (.snupkg) not found");
-                    Console.WriteLine();
+                    AnsiConsole.MarkupLine("[yellow]⚠[/] Symbols package (.snupkg) not found");
+                    AnsiConsole.WriteLine();
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"⚠ Could not download symbols package: {ex.Message}");
-                Console.WriteLine();
+                AnsiConsole.MarkupLine($"[yellow]⚠[/] Could not download symbols package: [dim]{ex.Message}[/]");
+                AnsiConsole.WriteLine();
             }
 
             // Step 5: Process each assembly to extract compiler arguments
             foreach (var assemblyPath in assemblies)
             {
-                Console.WriteLine($"Processing assembly: {Path.GetFileName(assemblyPath)}");
-                Console.WriteLine(new string('=', 80));
+                var assemblyPanel = new Panel($"[cyan]{Path.GetFileName(assemblyPath)}[/]")
+                    .Header("[yellow]Analyzing Assembly[/]")
+                    .BorderColor(Color.Yellow)
+                    .Expand();
+                AnsiConsole.Write(assemblyPanel);
                 
                 var pdbExtractor = new PdbCompilerArgumentsExtractor();
                 await pdbExtractor.ExtractCompilerArgumentsAsync(assemblyPath, _workingDirectory);
                 
-                Console.WriteLine();
+                AnsiConsole.WriteLine();
             }
 
             // Step 6: Output next steps and considerations
-            Console.WriteLine("NEXT STEPS FOR COMPLOG CREATION:");
-            Console.WriteLine(new string('=', 80));
-            Console.WriteLine(@"
-TODO: Implement the following to create a complete complog:
+            var nextStepsPanel = new Panel(
+                new Markup(@"[yellow]TODO: Implement the following to create a complete complog:[/]
 
-1. DEPENDENCY RESOLUTION:
-   - Parse the .nuspec file from the extracted package
-   - Recursively download all package dependencies based on target framework
-   - Handle dependency version ranges and resolve to specific versions
-   - Consider using NuGet.DependencyResolver or NuGet.Packaging APIs
+[cyan]1. DEPENDENCY RESOLUTION:[/]
+   • Parse the .nuspec file from the extracted package
+   • Recursively download all package dependencies based on target framework
+   • Handle dependency version ranges and resolve to specific versions
+   • Consider using NuGet.DependencyResolver or NuGet.Packaging APIs
 
-2. FRAMEWORK ASSEMBLIES:
-   - Identify the target framework from compiler arguments (e.g., net8.0, netstandard2.0)
-   - Download or locate the reference assemblies for that framework
-   - Options:
+[cyan]2. FRAMEWORK ASSEMBLIES:[/]
+   • Identify the target framework from compiler arguments (e.g., net8.0, netstandard2.0)
+   • Download or locate the reference assemblies for that framework
+   • Options:
      a) Use NuGet.Frameworks to identify framework
      b) Download reference assemblies from nuget.org (e.g., Microsoft.NETCore.App.Ref)
      c) Use local SDK reference assemblies if available
    
-3. SOURCE CODE EXTRACTION:
-   - Source files may be embedded in the PDB (Embedded Source)
-   - Or referenced via Source Link URLs (need to download from git repos)
-   - Parse Source Link JSON from PDB to map files to URLs
-   - Download source files and preserve directory structure
+[cyan]3. SOURCE CODE EXTRACTION:[/]
+   • Source files may be embedded in the PDB (Embedded Source)
+   • Or referenced via Source Link URLs (need to download from git repos)
+   • Parse Source Link JSON from PDB to map files to URLs
+   • Download source files and preserve directory structure
 
-4. COMPLOG PACKAGING:
-   - Create a standardized directory structure
-   - Package all references, sources, and compiler arguments
-   - Ensure deterministic/reproducible build capability
-   - Consider compression format (zip, tar.gz, or custom)
+[cyan]4. COMPLOG PACKAGING:[/]
+   • Create a standardized directory structure
+   • Package all references, sources, and compiler arguments
+   • Ensure deterministic/reproducible build capability
+   • Consider compression format (zip, tar.gz, or custom)
 
-5. VALIDATION:
-   - Verify we have all required references
-   - Check that source files match the compiled assembly
-   - Validate compiler arguments are complete
-   - Test that we can recreate the Roslyn workspace
+[cyan]5. VALIDATION:[/]
+   • Verify we have all required references
+   • Check that source files match the compiled assembly
+   • Validate compiler arguments are complete
+   • Test that we can recreate the Roslyn workspace
 
-LIMITATIONS TO HANDLE:
-- Not all packages are built with deterministic builds enabled
-- Not all packages include symbols (PDB files)
-- Some packages may have embedded PDBs in assemblies
-- Source Link may not be configured or repos may be private
-- Multi-targeting packages (need to pick or process all TFMs)
-");
+[yellow]LIMITATIONS TO HANDLE:[/]
+• Not all packages are built with deterministic builds enabled
+• Not all packages include symbols (PDB files)
+• Some packages may have embedded PDBs in assemblies
+• Source Link may not be configured or repos may be private
+• Multi-targeting packages (need to pick or process all TFMs)"))
+                .Header("[green]Next Steps for CompLog Creation[/]")
+                .BorderColor(Color.Green)
+                .Expand();
+            
+            AnsiConsole.Write(nextStepsPanel);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"ERROR: {ex.Message}");
-            Console.WriteLine(ex.StackTrace);
+            AnsiConsole.WriteException(ex, ExceptionFormats.ShortenEverything);
         }
     }
 

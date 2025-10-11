@@ -1,5 +1,6 @@
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
+using Spectre.Console;
 
 namespace NuGetToCompLog;
 
@@ -37,7 +38,7 @@ public class PdbCompilerArgumentsExtractor
 
             if (embeddedPdb.DataSize > 0)
             {
-                Console.WriteLine("  ✓ Found embedded PDB");
+                AnsiConsole.MarkupLine("  [green]✓ Found embedded PDB[/]");
                 await ExtractFromEmbeddedPdbAsync(peReader);
                 return;
             }
@@ -50,7 +51,7 @@ public class PdbCompilerArgumentsExtractor
             {
                 var codeViewData = peReader.ReadCodeViewDebugDirectoryData(codeView);
                 var pdbFileName = codeViewData.Path;
-                Console.WriteLine($"  → PDB reference: {pdbFileName}");
+                AnsiConsole.MarkupLine($"  [dim]→ PDB reference: {pdbFileName}[/]");
 
                 // Try to find the PDB file
                 pdbPath = FindExternalPdb(assemblyPath, pdbFileName, workingDirectory);
@@ -59,13 +60,17 @@ public class PdbCompilerArgumentsExtractor
 
         if (pdbPath != null && File.Exists(pdbPath))
         {
-            Console.WriteLine($"  ✓ Found external PDB: {Path.GetFileName(pdbPath)}");
+            AnsiConsole.MarkupLine($"  [green]✓ Found external PDB:[/] [cyan]{Path.GetFileName(pdbPath)}[/]");
             await ExtractFromExternalPdbAsync(pdbPath);
         }
         else
         {
-            Console.WriteLine("  ✗ No PDB found - cannot extract compiler arguments");
-            Console.WriteLine("    Note: Reproducible builds with embedded symbols are required for complog extraction");
+            var noSymbolsPanel = new Panel(
+                "[yellow]No PDB found[/] - cannot extract compiler arguments\n\n" +
+                "[dim]Note: Reproducible builds with embedded symbols are required for complog extraction[/]")
+                .BorderColor(Color.Yellow)
+                .Header("[yellow]⚠ Missing Symbols[/]");
+            AnsiConsole.Write(noSymbolsPanel);
         }
     }
 
@@ -91,9 +96,12 @@ public class PdbCompilerArgumentsExtractor
 
     private async Task ExtractCompilationOptionsAsync(MetadataReader metadataReader)
     {
-        Console.WriteLine();
-        Console.WriteLine("  COMPILATION OPTIONS:");
-        Console.WriteLine("  " + new string('-', 76));
+        AnsiConsole.WriteLine();
+        
+        var compilationPanel = new Panel("")
+            .Header("[cyan]Compilation Information[/]")
+            .BorderColor(Color.Cyan1)
+            .Expand();
 
         // Extract custom debug information (this is where compiler args live)
         foreach (var cdiHandle in metadataReader.GetCustomDebugInformation(EntityHandle.ModuleDefinition))
@@ -107,28 +115,31 @@ public class PdbCompilerArgumentsExtractor
                 var blob = metadataReader.GetBlobBytes(cdi.Value);
                 var options = System.Text.Encoding.UTF8.GetString(blob);
                 
-                Console.WriteLine("  Compiler Arguments:");
+                var argsTable = new Table()
+                    .BorderColor(Color.Grey)
+                    .AddColumn("[yellow]Compiler Arguments[/]");
+                
                 var args = ParseCompilerArguments(options);
                 foreach (var arg in args)
                 {
-                    Console.WriteLine($"    {arg}");
+                    argsTable.AddRow($"[cyan]{arg}[/]");
                 }
-                Console.WriteLine();
+                AnsiConsole.Write(argsTable);
+                AnsiConsole.WriteLine();
             }
 
             // CompilationMetadataReferences GUID: {7E4D4708-096E-4C5C-AEDA-CB10BA6A740D}
             if (guid.ToString().Equals("7E4D4708-096E-4C5C-AEDA-CB10BA6A740D", StringComparison.OrdinalIgnoreCase))
             {
                 var blob = metadataReader.GetBlobBytes(cdi.Value);
-                Console.WriteLine("  Metadata References:");
+                AnsiConsole.MarkupLine("[yellow]Metadata References:[/]");
                 ParseMetadataReferences(blob);
-                Console.WriteLine();
+                AnsiConsole.WriteLine();
             }
         }
 
         // Extract source files and Source Link information
-        Console.WriteLine("  SOURCE FILES:");
-        Console.WriteLine("  " + new string('-', 76));
+        var sourceFilesTree = new Tree("[yellow]Source Files[/]");
         
         int documentCount = 0;
         var sourceLinkUrls = new Dictionary<string, string>();
@@ -140,8 +151,7 @@ public class PdbCompilerArgumentsExtractor
             var language = metadataReader.GetGuid(document.Language);
             
             documentCount++;
-            Console.WriteLine($"    [{documentCount}] {name}");
-
+            
             // Check for embedded source
             var embeddedSource = metadataReader.GetCustomDebugInformation(docHandle)
                 .Select(h => metadataReader.GetCustomDebugInformation(h))
@@ -149,12 +159,17 @@ public class PdbCompilerArgumentsExtractor
 
             if (embeddedSource.Kind != default)
             {
-                Console.WriteLine($"        → Has embedded source");
+                sourceFilesTree.AddNode($"[green]{name}[/] [dim](embedded)[/]");
+            }
+            else
+            {
+                sourceFilesTree.AddNode($"[cyan]{name}[/]");
             }
         }
 
-        Console.WriteLine($"    Total: {documentCount} source files");
-        Console.WriteLine();
+        AnsiConsole.Write(sourceFilesTree);
+        AnsiConsole.MarkupLine($"  [dim]Total: {documentCount} source files[/]");
+        AnsiConsole.WriteLine();
 
         // Extract Source Link information
         var sourceLinkHandle = metadataReader.GetCustomDebugInformation(EntityHandle.ModuleDefinition)
@@ -166,10 +181,11 @@ public class PdbCompilerArgumentsExtractor
             var blob = metadataReader.GetBlobBytes(sourceLinkHandle.Value);
             var sourceLinkJson = System.Text.Encoding.UTF8.GetString(blob);
             
-            Console.WriteLine("  SOURCE LINK CONFIGURATION:");
-            Console.WriteLine("  " + new string('-', 76));
-            Console.WriteLine(sourceLinkJson);
-            Console.WriteLine();
+            var sourceLinkPanel = new Panel(new Markup($"[dim]{sourceLinkJson}[/]"))
+                .Header("[cyan]Source Link Configuration[/]")
+                .BorderColor(Color.Cyan1);
+            AnsiConsole.Write(sourceLinkPanel);
+            AnsiConsole.WriteLine();
             
             // TODO: Parse Source Link JSON to map local paths to repository URLs
             // Format: { "documents": { "C:\\path\\*": "https://raw.githubusercontent.com/user/repo/commit/*" } }
@@ -201,33 +217,41 @@ public class PdbCompilerArgumentsExtractor
         try
         {
             int count = reader.ReadInt32();
-            Console.WriteLine($"    Total references: {count}");
-            Console.WriteLine();
+            
+            var refsTable = new Table()
+                .BorderColor(Color.Grey)
+                .AddColumn("[dim]#[/]")
+                .AddColumn("[cyan]Reference[/]")
+                .AddColumn("[yellow]Aliases[/]");
 
-            for (int i = 0; i < count; i++)
+            for (int i = 0; i < count && i < 50; i++) // Limit to 50 for display
             {
                 int fileNameLength = reader.ReadInt32();
                 var fileName = System.Text.Encoding.UTF8.GetString(reader.ReadBytes(fileNameLength));
                 
-                Console.WriteLine($"    [{i + 1}] {fileName}");
-
                 // Read extern aliases count
                 int aliasCount = reader.ReadInt32();
-                if (aliasCount > 0)
+                var aliases = new List<string>();
+                for (int j = 0; j < aliasCount; j++)
                 {
-                    Console.WriteLine($"        Extern aliases: {aliasCount}");
-                    for (int j = 0; j < aliasCount; j++)
-                    {
-                        int aliasLength = reader.ReadInt32();
-                        var alias = System.Text.Encoding.UTF8.GetString(reader.ReadBytes(aliasLength));
-                        Console.WriteLine($"          - {alias}");
-                    }
+                    int aliasLength = reader.ReadInt32();
+                    var alias = System.Text.Encoding.UTF8.GetString(reader.ReadBytes(aliasLength));
+                    aliases.Add(alias);
                 }
 
-                // Read properties (simplified - actual format has more)
-                // byte embedInteropTypes = reader.ReadByte();
-                // This part can be extended based on actual requirements
+                refsTable.AddRow(
+                    $"[dim]{i + 1}[/]",
+                    $"[cyan]{Path.GetFileName(fileName)}[/]",
+                    aliases.Count > 0 ? string.Join(", ", aliases) : "[dim]-[/]"
+                );
             }
+
+            AnsiConsole.Write(refsTable);
+            if (count > 50)
+            {
+                AnsiConsole.MarkupLine($"[dim]... and {count - 50} more references[/]");
+            }
+            AnsiConsole.MarkupLine($"  [dim]Total: {count} references[/]");
 
             // TODO: For complog creation, we need to:
             // 1. Identify which references are framework assemblies vs NuGet packages
@@ -237,7 +261,7 @@ public class PdbCompilerArgumentsExtractor
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"    Warning: Could not fully parse metadata references: {ex.Message}");
+            AnsiConsole.MarkupLine($"[yellow]Warning:[/] Could not fully parse metadata references: [dim]{ex.Message}[/]");
         }
     }
 

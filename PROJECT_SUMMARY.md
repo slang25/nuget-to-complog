@@ -51,6 +51,7 @@ Outputs all extracted information to console for analysis
 - **NuGet.Protocol** - Official NuGet client library
 - **System.Reflection.Metadata** - Microsoft's portable PDB reader
 - **System.IO.Compression** - ZIP file handling
+- **Spectre.Console** - Rich, beautiful console UI with colors, tables, trees, and progress indicators
 
 ## What It Does Well
 
@@ -60,6 +61,7 @@ Outputs all extracted information to console for analysis
 ✅ **Extracts complete compiler information** when available
 ✅ **Provides helpful diagnostics** about what's missing
 ✅ **Well-documented** with comprehensive inline comments
+✅ **Beautiful console UI** with colors, tables, trees, spinners, and panels
 
 ## Current Limitations
 
