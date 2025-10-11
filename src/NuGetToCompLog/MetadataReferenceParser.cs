@@ -13,18 +13,18 @@ public record MetadataReference(
 /// Parses the CompilationMetadataReferences custom debug information from a PDB.
 /// 
 /// The format is documented in Roslyn's source:
-/// https://github.com/dotnet/roslyn/blob/main/docs/specs/PortablePdb-Metadata.md#compilationmetadatareferences-custom-debug-information
+/// https://github.com/dotnet/roslyn/blob/main/src/Compilers/Core/Portable/PEWriter/MetadataWriter.cs
 /// 
-/// Binary format:
-/// - Count (compressed integer)
-/// - For each reference:
-///   - File name (compressed string - length as compressed int, then UTF-8 bytes)
-///   - Alias count (compressed integer)
+/// Binary format (for each reference, no count prefix):
+///   - File name (serialized string: compressed length, then UTF-8 bytes)
+///   - Extern alias count (compressed integer)
 ///   - For each alias:
-///     - Alias name (compressed string)
+///     - Alias name (serialized string)
 ///   - Properties byte:
 ///     - Bit 0: EmbedInteropTypes
 ///     - Bits 1-7: Reserved (must be 0)
+///   - MVID (16 bytes - Module Version ID GUID, might be all zeros)
+///   - Timestamp (4 bytes - might be zero or -1)
 /// </summary>
 public static class MetadataReferenceParser
 {
@@ -35,28 +35,42 @@ public static class MetadataReferenceParser
 
         var references = new List<MetadataReference>();
         
-        // Read the count of references (compressed integer)
-        int count = ReadCompressedInteger(reader);
-        
-        for (int i = 0; i < count; i++)
+        // Read references until we reach the end of the stream
+        while (stream.Position < stream.Length)
         {
-            // Read file name (compressed string)
-            string fileName = ReadCompressedString(reader);
-            
-            // Read extern aliases count (compressed integer)
-            int aliasCount = ReadCompressedInteger(reader);
-            var aliases = new List<string>();
-            for (int j = 0; j < aliasCount; j++)
+            try
             {
-                string alias = ReadCompressedString(reader);
-                aliases.Add(alias);
+                // Read file name (serialized string: compressed length + UTF-8 bytes)
+                string fileName = ReadSerializedString(reader);
+                
+                // Read extern aliases count (compressed integer)
+                int aliasCount = ReadCompressedInteger(reader);
+                var aliases = new List<string>();
+                for (int j = 0; j < aliasCount; j++)
+                {
+                    string alias = ReadSerializedString(reader);
+                    aliases.Add(alias);
+                }
+                
+                // Read properties byte
+                byte properties = reader.ReadByte();
+                bool embedInteropTypes = (properties & 0x01) != 0;
+                
+                // Skip MVID (16 bytes) and timestamp (4 bytes)
+                // These are used internally by the compiler but not needed for our purposes
+                if (stream.Position + 20 <= stream.Length)
+                {
+                    reader.ReadBytes(20); // MVID (16) + timestamp (4)
+                }
+                
+                references.Add(new MetadataReference(fileName, aliases, embedInteropTypes));
             }
-            
-            // Read properties byte
-            byte properties = reader.ReadByte();
-            bool embedInteropTypes = (properties & 0x01) != 0;
-            
-            references.Add(new MetadataReference(fileName, aliases, embedInteropTypes));
+            catch (EndOfStreamException)
+            {
+                // If we can't read a complete reference, stop
+                // This might indicate the blob is malformed or we misunderstood the format
+                break;
+            }
         }
         
         return references;
@@ -95,10 +109,10 @@ public static class MetadataReferenceParser
     }
     
     /// <summary>
-    /// Reads a compressed string from the stream.
+    /// Reads a serialized string from the stream.
     /// Format: compressed integer length, followed by UTF-8 bytes.
     /// </summary>
-    private static string ReadCompressedString(BinaryReader reader)
+    private static string ReadSerializedString(BinaryReader reader)
     {
         int length = ReadCompressedInteger(reader);
         

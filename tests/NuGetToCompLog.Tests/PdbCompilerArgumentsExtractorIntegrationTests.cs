@@ -57,23 +57,28 @@ public class PdbCompilerArgumentsExtractorIntegrationTests
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
 
-        // Write 3 references
-        WriteCompressedInteger(writer, 3);
+        // No count prefix - just write references
 
         // Reference 1: System.Runtime.dll (no aliases, no embed)
-        WriteCompressedString(writer, "System.Runtime.dll");
+        WriteSerializedString(writer, "System.Runtime.dll");
         WriteCompressedInteger(writer, 0); // no aliases
         writer.Write((byte)0x00); // no embed
+        writer.Write(new byte[16]); // MVID
+        writer.Write((int)0); // timestamp
 
         // Reference 2: System.Collections.dll (no aliases, no embed)
-        WriteCompressedString(writer, "System.Collections.dll");
+        WriteSerializedString(writer, "System.Collections.dll");
         WriteCompressedInteger(writer, 0);
         writer.Write((byte)0x00);
+        writer.Write(new byte[16]);
+        writer.Write((int)0);
 
         // Reference 3: Newtonsoft.Json.dll (no aliases, no embed)
-        WriteCompressedString(writer, "Newtonsoft.Json.dll");
+        WriteSerializedString(writer, "Newtonsoft.Json.dll");
         WriteCompressedInteger(writer, 0);
         writer.Write((byte)0x00);
+        writer.Write(new byte[16]);
+        writer.Write((int)0);
 
         return stream.ToArray();
     }
@@ -86,34 +91,43 @@ public class PdbCompilerArgumentsExtractorIntegrationTests
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
 
-        // Write 5 references with various properties
-        WriteCompressedInteger(writer, 5);
+        // No count prefix - just write references
 
         // Reference 1: Simple
-        WriteCompressedString(writer, "System.Runtime.dll");
+        WriteSerializedString(writer, "System.Runtime.dll");
         WriteCompressedInteger(writer, 0);
         writer.Write((byte)0x00);
+        writer.Write(new byte[16]);
+        writer.Write((int)0);
 
         // Reference 2: Simple
-        WriteCompressedString(writer, "System.Collections.dll");
+        WriteSerializedString(writer, "System.Collections.dll");
         WriteCompressedInteger(writer, 0);
         writer.Write((byte)0x00);
+        writer.Write(new byte[16]);
+        writer.Write((int)0);
 
         // Reference 3: Simple
-        WriteCompressedString(writer, "System.Linq.dll");
+        WriteSerializedString(writer, "System.Linq.dll");
         WriteCompressedInteger(writer, 0);
         writer.Write((byte)0x00);
+        writer.Write(new byte[16]);
+        writer.Write((int)0);
 
         // Reference 4: With alias
-        WriteCompressedString(writer, "CustomLib.dll");
+        WriteSerializedString(writer, "CustomLib.dll");
         WriteCompressedInteger(writer, 1);
-        WriteCompressedString(writer, "global");
+        WriteSerializedString(writer, "global");
         writer.Write((byte)0x00);
+        writer.Write(new byte[16]);
+        writer.Write((int)0);
 
         // Reference 5: With embed interop types
-        WriteCompressedString(writer, "Interop.Office.dll");
+        WriteSerializedString(writer, "Interop.Office.dll");
         WriteCompressedInteger(writer, 0);
         writer.Write((byte)0x01); // embed interop types
+        writer.Write(new byte[16]);
+        writer.Write((int)0);
 
         return stream.ToArray();
     }
@@ -147,7 +161,7 @@ public class PdbCompilerArgumentsExtractorIntegrationTests
         }
     }
 
-    private void WriteCompressedString(BinaryWriter writer, string value)
+    private void WriteSerializedString(BinaryWriter writer, string value)
     {
         var bytes = System.Text.Encoding.UTF8.GetBytes(value);
         WriteCompressedInteger(writer, bytes.Length);

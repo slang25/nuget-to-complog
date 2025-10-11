@@ -131,24 +131,28 @@ public class MetadataReferenceParserTests
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
 
-        // Write count (compressed integer)
-        WriteCompressedInteger(writer, references.Length);
-
+        // No count prefix - just write references sequentially
         foreach (var (fileName, aliases, embedInteropTypes) in references)
         {
-            // Write file name (compressed string)
-            WriteCompressedString(writer, fileName);
+            // Write file name (serialized string)
+            WriteSerializedString(writer, fileName);
 
             // Write alias count and aliases
             WriteCompressedInteger(writer, aliases.Length);
             foreach (var alias in aliases)
             {
-                WriteCompressedString(writer, alias);
+                WriteSerializedString(writer, alias);
             }
 
             // Write properties byte
             byte properties = embedInteropTypes ? (byte)0x01 : (byte)0x00;
             writer.Write(properties);
+            
+            // Write MVID (16 bytes - all zeros for test)
+            writer.Write(new byte[16]);
+            
+            // Write timestamp (4 bytes - zero for test)
+            writer.Write((int)0);
         }
 
         return stream.ToArray();
@@ -186,7 +190,7 @@ public class MetadataReferenceParserTests
         }
     }
 
-    private void WriteCompressedString(BinaryWriter writer, string value)
+    private void WriteSerializedString(BinaryWriter writer, string value)
     {
         var bytes = System.Text.Encoding.UTF8.GetBytes(value);
         WriteCompressedInteger(writer, bytes.Length);
