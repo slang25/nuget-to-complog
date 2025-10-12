@@ -67,18 +67,29 @@ public class CompilerArgumentsExtractor
             AnsiConsole.WriteLine();
 
             // Step 3: Find assemblies in the package
-            var assemblies = FindAssemblies(extractPath);
+            var allAssemblies = FindAssemblies(extractPath);
             
-            var assemblyTree = new Tree($"[green]Found {assemblies.Count} assemblies[/]");
-            foreach (var assembly in assemblies)
+            var allAssembliesTree = new Tree($"[green]Found {allAssemblies.Count} assemblies across all TFMs[/]");
+            foreach (var assembly in allAssemblies)
             {
                 var relativePath = Path.GetRelativePath(extractPath, assembly);
                 var parts = relativePath.Split(Path.DirectorySeparatorChar);
                 var framework = parts.Length > 1 ? parts[1] : "unknown";
-                assemblyTree.AddNode($"[cyan]{framework}[/] / [yellow]{Path.GetFileName(assembly)}[/]");
+                allAssembliesTree.AddNode($"[cyan]{framework}[/] / [yellow]{Path.GetFileName(assembly)}[/]");
             }
-            AnsiConsole.Write(assemblyTree);
+            AnsiConsole.Write(allAssembliesTree);
             AnsiConsole.WriteLine();
+
+            // Select the best TFM
+            var assemblies = SelectBestTargetFramework(allAssemblies, extractPath);
+            if (assemblies.Count > 0)
+            {
+                var relativePath = Path.GetRelativePath(extractPath, assemblies[0]);
+                var parts = relativePath.Split(Path.DirectorySeparatorChar);
+                var selectedTfm = parts.Length > 1 ? parts[1] : "unknown";
+                AnsiConsole.MarkupLine($"[green]✓[/] Selected best TFM: [cyan]{selectedTfm}[/] with [yellow]{assemblies.Count}[/] assemblies");
+                AnsiConsole.WriteLine();
+            }
 
             // Step 4: Try to download symbols package (snupkg)
             string? snupkgPath = null;
@@ -329,5 +340,128 @@ public class CompilerArgumentsExtractor
         }
 
         return assemblies;
+    }
+
+    private List<string> SelectBestTargetFramework(List<string> assemblies, string extractPath)
+    {
+        if (assemblies.Count == 0)
+            return assemblies;
+
+        // Group assemblies by their target framework
+        var groupedByTfm = assemblies
+            .GroupBy(assembly =>
+            {
+                var relativePath = Path.GetRelativePath(extractPath, assembly);
+                var parts = relativePath.Split(Path.DirectorySeparatorChar);
+                // TFM is typically the folder after lib/ or ref/
+                return parts.Length > 1 ? parts[1] : "unknown";
+            })
+            .ToList();
+
+        // If only one TFM, return all assemblies
+        if (groupedByTfm.Count == 1)
+            return assemblies;
+
+        // Select the best TFM based on priority and version
+        var bestTfm = groupedByTfm
+            .OrderByDescending(g => GetTargetFrameworkPriority(g.Key))
+            .ThenByDescending(g => GetTargetFrameworkVersion(g.Key))
+            .First();
+
+        return bestTfm.ToList();
+    }
+
+    private (int priority, int major, int minor) GetTargetFrameworkPriority(string tfm)
+    {
+        tfm = tfm.ToLowerInvariant();
+
+        // .NET (net5.0+) - highest priority
+        if (tfm.StartsWith("net") && !tfm.StartsWith("netstandard") && !tfm.StartsWith("netcoreapp") && !tfm.StartsWith("netframework"))
+        {
+            // Check if it's .NET 5+ (single digit after 'net')
+            var versionPart = tfm.Substring(3);
+            if (versionPart.Length > 0 && char.IsDigit(versionPart[0]))
+            {
+                var firstChar = versionPart[0];
+                // net5.0, net6.0, net7.0, net8.0, net9.0, etc.
+                if (firstChar >= '5')
+                {
+                    var version = ParseVersion(versionPart);
+                    return (3, version.major, version.minor); // Priority 3 for modern .NET
+                }
+            }
+        }
+
+        // .NET Standard - second priority
+        if (tfm.StartsWith("netstandard"))
+        {
+            var versionPart = tfm.Substring("netstandard".Length);
+            var version = ParseVersion(versionPart);
+            return (2, version.major, version.minor);
+        }
+
+        // .NET Core App
+        if (tfm.StartsWith("netcoreapp"))
+        {
+            var versionPart = tfm.Substring("netcoreapp".Length);
+            var version = ParseVersion(versionPart);
+            return (2, version.major, version.minor);
+        }
+
+        // .NET Framework - third priority
+        if (tfm.StartsWith("net") && (tfm.Contains("framework") || char.IsDigit(tfm[3])))
+        {
+            var versionPart = tfm.Replace("framework", "");
+            if (versionPart.StartsWith("net"))
+                versionPart = versionPart.Substring(3);
+            var version = ParseVersion(versionPart);
+            return (1, version.major, version.minor);
+        }
+
+        // Unknown/other - lowest priority
+        return (0, 0, 0);
+    }
+
+    private (int major, int minor) GetTargetFrameworkVersion(string tfm)
+    {
+        var (_, major, minor) = GetTargetFrameworkPriority(tfm);
+        return (major, minor);
+    }
+
+    private (int major, int minor) ParseVersion(string versionPart)
+    {
+        if (string.IsNullOrEmpty(versionPart))
+            return (0, 0);
+
+        // Handle versions like "8.0", "9.0", "48", "472", "2.0", "2.1"
+        versionPart = versionPart.TrimStart('v');
+        
+        // Split by dot if present
+        var parts = versionPart.Split('.');
+        if (parts.Length >= 2)
+        {
+            if (int.TryParse(parts[0], out var major) && int.TryParse(parts[1], out var minor))
+                return (major, minor);
+        }
+        else if (parts.Length == 1)
+        {
+            // Handle compact versions like "48" (net48), "472" (net472)
+            if (int.TryParse(parts[0], out var version))
+            {
+                if (version >= 10)
+                {
+                    // Split into major.minor (e.g., 48 -> 4.8, 472 -> 4.7.2)
+                    var major = version / 10;
+                    var minor = version % 10;
+                    return (major, minor);
+                }
+                else
+                {
+                    return (version, 0);
+                }
+            }
+        }
+
+        return (0, 0);
     }
 }
