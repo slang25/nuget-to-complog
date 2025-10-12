@@ -62,7 +62,7 @@ public static class MetadataReferenceParser
                 blobReader.ReadByte(); // Skip null terminator
                 
                 var externAliases = string.IsNullOrEmpty(externAliasesStr) 
-                    ? new List<string>() 
+                    ? []
                     : externAliasesStr.Split(',').ToList();
                 
                 // Read EmbedInteropTypes/MetadataImageKind byte
@@ -120,7 +120,7 @@ public static class MetadataReferenceParser
                 // Read extern aliases (null-terminated string, comma-separated)
                 var externAliasesStr = ReadNullTerminatedString(reader);
                 var externAliases = string.IsNullOrEmpty(externAliasesStr)
-                    ? new List<string>()
+                    ? []
                     : externAliasesStr.Split(',').ToList();
                 
                 // Read EmbedInteropTypes/MetadataImageKind byte
