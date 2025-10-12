@@ -1,7 +1,14 @@
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.IO.Compression;
+using System.Text.Json;
 using Spectre.Console;
+using NuGet.Common;
+using NuGet.Protocol;
+using NuGet.Protocol.Core.Types;
+using NuGet.Versioning;
+using NuGet.Frameworks;
+using NuGet.Packaging;
 
 namespace NuGetToCompLog;
 
@@ -21,8 +28,15 @@ namespace NuGetToCompLog;
 /// </summary>
 public class PdbCompilerArgumentsExtractor
 {
+    private readonly ILogger _logger = NullLogger.Instance;
+    private readonly HashSet<string> _downloadedPackages = new();
+    private readonly HashSet<string> _downloadedFrameworkPacks = new();
+    private string _workingDirectory = "";
+    
     public async Task ExtractCompilerArgumentsAsync(string assemblyPath, string workingDirectory)
     {
+        _workingDirectory = workingDirectory;
+        
         // Try three approaches to find the PDB:
         // 1. Embedded PDB in the assembly
         // 2. External PDB file next to the assembly
@@ -154,7 +168,7 @@ public class PdbCompilerArgumentsExtractor
             {
                 var blobReader = metadataReader.GetBlobReader(cdi.Value);
                 AnsiConsole.MarkupLine("[yellow]Metadata References:[/]");
-                ParseMetadataReferences(blobReader);
+                await ParseMetadataReferencesAsync(blobReader);
                 AnsiConsole.WriteLine();
             }
         }
@@ -164,6 +178,7 @@ public class PdbCompilerArgumentsExtractor
         
         int documentCount = 0;
         var sourceLinkUrls = new Dictionary<string, string>();
+        var documentsToDownload = new List<(DocumentHandle handle, string path)>();
 
         foreach (var docHandle in metadataReader.Documents)
         {
@@ -189,6 +204,7 @@ public class PdbCompilerArgumentsExtractor
             else
             {
                 sourceFilesTree.AddNode($"[cyan]{name}[/]");
+                documentsToDownload.Add((docHandle, name));
             }
         }
 
@@ -201,22 +217,294 @@ public class PdbCompilerArgumentsExtractor
             .Select(h => metadataReader.GetCustomDebugInformation(h))
             .FirstOrDefault(cdi => metadataReader.GetGuid(cdi.Kind).ToString().Equals("CC110556-A091-4D38-9FEC-25AB9A351A6A", StringComparison.OrdinalIgnoreCase));
 
+        string? sourceLinkJson = null;
         if (sourceLinkHandle.Kind != default)
         {
             var blob = metadataReader.GetBlobBytes(sourceLinkHandle.Value);
-            var sourceLinkJson = System.Text.Encoding.UTF8.GetString(blob);
+            sourceLinkJson = System.Text.Encoding.UTF8.GetString(blob);
             
             var sourceLinkPanel = new Panel(new Markup($"[dim]{sourceLinkJson}[/]"))
                 .Header("[cyan]Source Link Configuration[/]")
                 .BorderColor(Color.Cyan1);
             AnsiConsole.Write(sourceLinkPanel);
             AnsiConsole.WriteLine();
-            
-            // TODO: Parse Source Link JSON to map local paths to repository URLs
-            // Format: { "documents": { "C:\\path\\*": "https://raw.githubusercontent.com/user/repo/commit/*" } }
         }
 
+        // Download all source files
+        await DownloadSourceFilesAsync(metadataReader, documentsToDownload, sourceLinkJson);
+
         await Task.CompletedTask;
+    }
+
+    private async Task DownloadSourceFilesAsync(
+        MetadataReader metadataReader,
+        List<(DocumentHandle handle, string path)> documentsToDownload,
+        string? sourceLinkJson)
+    {
+        var sourcesDir = Path.Combine(_workingDirectory, "sources");
+        Directory.CreateDirectory(sourcesDir);
+
+        AnsiConsole.MarkupLine("[yellow]Downloading Source Files:[/]");
+        
+        int embeddedCount = 0;
+        int downloadedCount = 0;
+        int failedCount = 0;
+
+        // Parse Source Link mappings
+        var sourceLinkMappings = ParseSourceLinkMappings(sourceLinkJson);
+
+        // First, extract all embedded sources
+        foreach (var docHandle in metadataReader.Documents)
+        {
+            var document = metadataReader.GetDocument(docHandle);
+            var name = metadataReader.GetString(document.Name);
+
+            var embeddedSourceCdi = metadataReader.GetCustomDebugInformation(docHandle)
+                .Select(h => metadataReader.GetCustomDebugInformation(h))
+                .Where(cdi => metadataReader.GetGuid(cdi.Kind).ToString().Equals("0E8A571B-6926-466E-B4AD-8AB04611F5FE",
+                    StringComparison.OrdinalIgnoreCase))
+                .Cast<CustomDebugInformation?>()
+                .FirstOrDefault();
+
+            if (embeddedSourceCdi.HasValue && embeddedSourceCdi.Value.Kind != default)
+            {
+                try
+                {
+                    var embeddedSourceBlob = metadataReader.GetBlobBytes(embeddedSourceCdi.Value.Value);
+                    var sourceText = DecompressEmbeddedSource(embeddedSourceBlob);
+                    
+                    if (sourceText != null)
+                    {
+                        var localPath = SaveSourceFile(sourcesDir, name, sourceText);
+                        embeddedCount++;
+                        
+                        if (embeddedCount <= 3) // Show first few
+                        {
+                            AnsiConsole.MarkupLine($"  [green]✓[/] Extracted embedded: [dim]{Path.GetFileName(name)}[/]");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AnsiConsole.MarkupLine($"  [yellow]⚠[/] Failed to extract embedded source [dim]{Path.GetFileName(name)}: {ex.Message}[/]");
+                    failedCount++;
+                }
+            }
+        }
+
+        if (embeddedCount > 3)
+        {
+            AnsiConsole.MarkupLine($"  [green]✓[/] Extracted {embeddedCount} embedded source files");
+        }
+
+        // Download sources from Source Link URLs
+        if (sourceLinkMappings.Count > 0)
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("  [cyan]Downloading from Source Link URLs...[/]");
+            
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(30);
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "NuGetToCompLog/1.0");
+
+            var downloadTasks = new List<Task<(bool success, string fileName)>>();
+            var semaphore = new SemaphoreSlim(5); // Limit concurrent downloads
+
+            foreach (var (handle, path) in documentsToDownload)
+            {
+                // Skip if already extracted as embedded
+                var document = metadataReader.GetDocument(handle);
+                var hasEmbedded = metadataReader.GetCustomDebugInformation(handle)
+                    .Select(h => metadataReader.GetCustomDebugInformation(h))
+                    .Any(cdi => metadataReader.GetGuid(cdi.Kind).ToString().Equals("0E8A571B-6926-466E-B4AD-8AB04611F5FE",
+                        StringComparison.OrdinalIgnoreCase));
+
+                if (hasEmbedded) continue;
+
+                var url = MapSourceLinkUrl(path, sourceLinkMappings);
+                if (url == null) continue;
+
+                downloadTasks.Add(DownloadSourceFileAsync(httpClient, semaphore, url, path, sourcesDir));
+            }
+
+            var results = await Task.WhenAll(downloadTasks);
+            downloadedCount = results.Count(r => r.success);
+            failedCount += results.Count(r => !r.success);
+
+            if (downloadedCount > 0)
+            {
+                AnsiConsole.MarkupLine($"  [green]✓[/] Downloaded {downloadedCount} source files from repository");
+            }
+        }
+
+        AnsiConsole.WriteLine();
+        var summary = new Panel(
+            $"[green]✓ Embedded sources:[/] {embeddedCount}\n" +
+            $"[cyan]✓ Downloaded from URLs:[/] {downloadedCount}\n" +
+            (failedCount > 0 ? $"[yellow]⚠ Failed:[/] {failedCount}\n" : "") +
+            $"[dim]Total source files:[/] {embeddedCount + downloadedCount}")
+            .Header("[yellow]Source Download Summary[/]")
+            .BorderColor(Color.Yellow);
+        AnsiConsole.Write(summary);
+        AnsiConsole.WriteLine();
+    }
+
+    private Dictionary<string, string> ParseSourceLinkMappings(string? sourceLinkJson)
+    {
+        var mappings = new Dictionary<string, string>();
+        
+        if (string.IsNullOrEmpty(sourceLinkJson))
+        {
+            return mappings;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(sourceLinkJson);
+            if (doc.RootElement.TryGetProperty("documents", out var documents))
+            {
+                foreach (var prop in documents.EnumerateObject())
+                {
+                    mappings[prop.Name] = prop.Value.GetString() ?? "";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"  [yellow]⚠[/] Failed to parse Source Link JSON: [dim]{ex.Message}[/]");
+        }
+
+        return mappings;
+    }
+
+    private string? MapSourceLinkUrl(string localPath, Dictionary<string, string> mappings)
+    {
+        // Source Link mappings use wildcards like:
+        // "C:\path\*" -> "https://raw.githubusercontent.com/user/repo/commit/*"
+        
+        var normalizedPath = localPath.Replace('\\', '/');
+        
+        foreach (var (pattern, urlTemplate) in mappings)
+        {
+            var normalizedPattern = pattern.Replace('\\', '/');
+            
+            // Check if pattern contains wildcard
+            var wildcardIndex = normalizedPattern.IndexOf('*');
+            if (wildcardIndex < 0) continue;
+
+            var prefix = normalizedPattern.Substring(0, wildcardIndex);
+            
+            // Check if the path matches the prefix
+            if (normalizedPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var relativePath = normalizedPath.Substring(prefix.Length);
+                var url = urlTemplate.Replace("*", relativePath);
+                return url;
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<(bool success, string fileName)> DownloadSourceFileAsync(
+        HttpClient httpClient,
+        SemaphoreSlim semaphore,
+        string url,
+        string localPath,
+        string sourcesDir)
+    {
+        await semaphore.WaitAsync();
+        
+        try
+        {
+            var response = await httpClient.GetAsync(url);
+            if (response.IsSuccessStatusCode)
+            {
+                var content = await response.Content.ReadAsStringAsync();
+                var savedPath = SaveSourceFile(sourcesDir, localPath, content);
+                
+                return (true, Path.GetFileName(localPath));
+            }
+            else
+            {
+                return (false, Path.GetFileName(localPath));
+            }
+        }
+        catch
+        {
+            return (false, Path.GetFileName(localPath));
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private string? DecompressEmbeddedSource(byte[] blob)
+    {
+        // Embedded source format:
+        // First 4 bytes: uncompressed size (int32)
+        // Remaining bytes: deflate-compressed UTF-8 text
+        
+        if (blob.Length < 4)
+        {
+            return null;
+        }
+
+        try
+        {
+            var uncompressedSize = BitConverter.ToInt32(blob, 0);
+            
+            // If uncompressed size is 0, the source is stored uncompressed
+            if (uncompressedSize == 0)
+            {
+                return System.Text.Encoding.UTF8.GetString(blob, 4, blob.Length - 4);
+            }
+
+            using var compressedStream = new MemoryStream(blob, 4, blob.Length - 4);
+            using var deflateStream = new System.IO.Compression.DeflateStream(compressedStream, CompressionMode.Decompress);
+            using var decompressedStream = new MemoryStream(uncompressedSize);
+            
+            deflateStream.CopyTo(decompressedStream);
+            
+            return System.Text.Encoding.UTF8.GetString(decompressedStream.ToArray());
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string SaveSourceFile(string sourcesDir, string originalPath, string content)
+    {
+        // Sanitize the path and create a safe file structure
+        // Convert absolute paths to relative and remove drive letters
+        var sanitizedPath = originalPath
+            .Replace('\\', '/')
+            .TrimStart('/');
+
+        // Remove drive letter if present (e.g., C:/)
+        if (sanitizedPath.Length > 2 && sanitizedPath[1] == ':')
+        {
+            sanitizedPath = sanitizedPath.Substring(2).TrimStart('/');
+        }
+
+        // Remove leading path markers like /_/
+        if (sanitizedPath.StartsWith("_/"))
+        {
+            sanitizedPath = sanitizedPath.Substring(2);
+        }
+
+        var fullPath = Path.Combine(sourcesDir, sanitizedPath);
+        var directory = Path.GetDirectoryName(fullPath);
+        
+        if (directory != null)
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        File.WriteAllText(fullPath, content);
+        return fullPath;
     }
 
     private string[] ParseCompilerArguments(string options)
@@ -225,7 +513,7 @@ public class PdbCompilerArgumentsExtractor
         return options.Split('\0', StringSplitOptions.RemoveEmptyEntries);
     }
 
-    private void ParseMetadataReferences(BlobReader blobReader)
+    private async Task ParseMetadataReferencesAsync(BlobReader blobReader)
     {
         try
         {
@@ -259,15 +547,515 @@ public class PdbCompilerArgumentsExtractor
             }
             AnsiConsole.MarkupLine($"  [dim]Total: {references.Count} references[/]");
 
-            // TODO: For complog creation, we need to:
-            // 1. Identify which references are framework assemblies vs NuGet packages
-            // 2. For framework assemblies: download the appropriate reference pack
-            // 3. For NuGet packages: recursively process dependencies
-            // 4. Preserve the exact versions and paths for reproducibility
+            // Acquire all reference assemblies and download dependent NuGet packages
+            await AcquireReferenceAssembliesAsync(references, _workingDirectory);
         }
         catch (Exception ex)
         {
             AnsiConsole.MarkupLine($"[yellow]Warning:[/] Could not fully parse metadata references: [dim]{ex.Message}[/]");
+        }
+    }
+
+    private async Task AcquireReferenceAssembliesAsync(List<MetadataReference> references, string workingDirectory)
+    {
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[yellow]Acquiring Reference Assemblies:[/]");
+        
+        var referencesDir = Path.Combine(workingDirectory, "references");
+        Directory.CreateDirectory(referencesDir);
+
+        // Determine the target framework from the compiler arguments or references
+        var targetFramework = DetermineTargetFramework(references);
+        AnsiConsole.MarkupLine($"  [dim]→ Target framework: {targetFramework ?? "unknown"}[/]");
+
+        var frameworkRefs = new List<MetadataReference>();
+        var nugetRefs = new List<MetadataReference>();
+        
+        // Categorize references
+        foreach (var reference in references)
+        {
+            if (IsFrameworkAssembly(reference.FileName))
+            {
+                frameworkRefs.Add(reference);
+            }
+            else if (IsNuGetPackageReference(reference.FileName))
+            {
+                nugetRefs.Add(reference);
+            }
+        }
+
+        AnsiConsole.MarkupLine($"  [cyan]Framework assemblies:[/] {frameworkRefs.Count}");
+        AnsiConsole.MarkupLine($"  [cyan]NuGet package references:[/] {nugetRefs.Count}");
+        AnsiConsole.WriteLine();
+
+        // Download framework reference assemblies
+        if (frameworkRefs.Count > 0 && targetFramework != null)
+        {
+            await DownloadFrameworkReferencePackAsync(targetFramework, referencesDir);
+        }
+
+        // Download NuGet package dependencies recursively
+        foreach (var nugetRef in nugetRefs)
+        {
+            var packageInfo = ExtractPackageInfoFromPath(nugetRef.FileName);
+            if (packageInfo.HasValue)
+            {
+                await DownloadNuGetPackageRecursivelyAsync(
+                    packageInfo.Value.PackageId, 
+                    packageInfo.Value.Version, 
+                    referencesDir,
+                    targetFramework);
+            }
+        }
+    }
+
+    private string? DetermineTargetFramework(List<MetadataReference> references)
+    {
+        // Try to determine target framework from reference paths
+        // NuGet package references typically have paths like:
+        // .nuget/packages/{package}/{version}/lib/{tfm}/{assembly}.dll
+        // or ref/{tfm}/{assembly}.dll
+        
+        foreach (var reference in references)
+        {
+            var path = reference.FileName.Replace('\\', '/');
+            
+            // Look for common TFM patterns in paths
+            var tfmPatterns = new[] { "/lib/", "/ref/" };
+            foreach (var pattern in tfmPatterns)
+            {
+                var index = path.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
+                if (index >= 0)
+                {
+                    var afterPattern = path.Substring(index + pattern.Length);
+                    var nextSlash = afterPattern.IndexOf('/');
+                    if (nextSlash > 0)
+                    {
+                        var tfm = afterPattern.Substring(0, nextSlash);
+                        // Validate it looks like a TFM (e.g., net8.0, netstandard2.0, net6.0)
+                        if (tfm.StartsWith("net", StringComparison.OrdinalIgnoreCase) && 
+                            (tfm.Contains(".") || char.IsDigit(tfm[3])))
+                        {
+                            return tfm;
+                        }
+                    }
+                }
+            }
+        }
+        
+        return null;
+    }
+
+    private bool IsFrameworkAssembly(string fileName)
+    {
+        // Framework assemblies typically:
+        // 1. Are in the dotnet/packs directory
+        // 2. Have common BCL names (System.*, Microsoft.CSharp, mscorlib, etc.)
+        // 3. Are in the Microsoft.NETCore.App.Ref or similar reference packs
+        
+        var path = fileName.Replace('\\', '/').ToLowerInvariant();
+        
+        // Check for dotnet packs/shared directory
+        if (path.Contains("/packs/") || path.Contains("/shared/"))
+        {
+            return true;
+        }
+        
+        // Check for well-known framework assembly names
+        var assemblyName = Path.GetFileNameWithoutExtension(fileName);
+        var frameworkAssemblyPrefixes = new[]
+        {
+            "System.", "Microsoft.CSharp", "Microsoft.VisualBasic", "Microsoft.Win32.",
+            "netstandard", "mscorlib", "WindowsBase", "PresentationCore", "PresentationFramework"
+        };
+        
+        return frameworkAssemblyPrefixes.Any(prefix => 
+            assemblyName.Equals(prefix.TrimEnd('.'), StringComparison.OrdinalIgnoreCase) ||
+            assemblyName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool IsNuGetPackageReference(string fileName)
+    {
+        // NuGet package references typically have paths like:
+        // C:\Users\user\.nuget\packages\{package}\{version}\lib\{tfm}\{assembly}.dll
+        // or similar patterns
+        
+        var path = fileName.Replace('\\', '/').ToLowerInvariant();
+        return path.Contains("/.nuget/packages/") || path.Contains("\\.nuget\\packages\\");
+    }
+
+    private (string PackageId, string Version)? ExtractPackageInfoFromPath(string fileName)
+    {
+        // Extract package ID and version from NuGet package path
+        // Typical path: .nuget/packages/{packageId}/{version}/lib/{tfm}/{assembly}.dll
+        
+        var path = fileName.Replace('\\', '/');
+        var packagesIndex = path.IndexOf("/.nuget/packages/", StringComparison.OrdinalIgnoreCase);
+        
+        if (packagesIndex >= 0)
+        {
+            var afterPackages = path.Substring(packagesIndex + "/.nuget/packages/".Length);
+            var parts = afterPackages.Split('/');
+            
+            if (parts.Length >= 2)
+            {
+                var packageId = parts[0];
+                var version = parts[1];
+                return (packageId, version);
+            }
+        }
+        
+        return null;
+    }
+
+    private async Task DownloadFrameworkReferencePackAsync(string targetFramework, string referencesDir)
+    {
+        // Framework reference packs are distributed as NuGet packages
+        // For example: Microsoft.NETCore.App.Ref for .NET Core/5+
+        
+        var frameworkKey = $"{targetFramework}";
+        if (_downloadedFrameworkPacks.Contains(frameworkKey))
+        {
+            return; // Already downloaded
+        }
+
+        AnsiConsole.MarkupLine($"  [yellow]→[/] Downloading framework reference pack for [cyan]{targetFramework}[/]...");
+        
+        try
+        {
+            // Map TFM to reference pack package
+            var refPackage = GetReferencePackageForFramework(targetFramework);
+            if (refPackage == null)
+            {
+                AnsiConsole.MarkupLine($"    [dim]No reference pack mapping found for {targetFramework}[/]");
+                return;
+            }
+
+            var cache = new SourceCacheContext();
+            var repository = Repository.Factory.GetCoreV3("https://api.nuget.org/v3/index.json");
+            var resource = await repository.GetResourceAsync<FindPackageByIdResource>();
+
+            // Get all versions and find one matching or close to the TFM version
+            var versions = await resource.GetAllVersionsAsync(
+                refPackage,
+                cache,
+                _logger,
+                CancellationToken.None);
+
+            var targetVersion = ExtractVersionFromTfm(targetFramework);
+            var version = FindBestMatchingVersion(versions, targetVersion);
+            
+            if (version == null)
+            {
+                AnsiConsole.MarkupLine($"    [dim]No suitable version found for {refPackage}[/]");
+                return;
+            }
+
+            var packagePath = Path.Combine(referencesDir, $"{refPackage}.{version}.nupkg");
+            
+            // Check if already exists
+            if (File.Exists(packagePath))
+            {
+                AnsiConsole.MarkupLine($"    [green]✓[/] Reference pack already downloaded");
+                _downloadedFrameworkPacks.Add(frameworkKey);
+                return;
+            }
+
+            using var packageStream = File.Create(packagePath);
+            var success = await resource.CopyNupkgToStreamAsync(
+                refPackage,
+                version,
+                packageStream,
+                cache,
+                _logger,
+                CancellationToken.None);
+
+            if (success)
+            {
+                packageStream.Close();
+                
+                // Extract the package to get the reference assemblies
+                var extractPath = Path.Combine(referencesDir, $"{refPackage}.{version}");
+                if (!Directory.Exists(extractPath))
+                {
+                    ZipFile.ExtractToDirectory(packagePath, extractPath);
+                }
+                
+                AnsiConsole.MarkupLine($"    [green]✓[/] Downloaded {refPackage} {version}");
+                _downloadedFrameworkPacks.Add(frameworkKey);
+            }
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"    [yellow]⚠[/] Failed to download framework reference pack: [dim]{ex.Message}[/]");
+        }
+    }
+
+    private string? GetReferencePackageForFramework(string targetFramework)
+    {
+        // Map TFMs to their reference pack packages
+        var tfmLower = targetFramework.ToLowerInvariant();
+        
+        if (tfmLower.StartsWith("net") && !tfmLower.StartsWith("netstandard") && !tfmLower.StartsWith("netcoreapp"))
+        {
+            // .NET 5+ uses Microsoft.NETCore.App.Ref
+            if (tfmLower.StartsWith("net5") || tfmLower.StartsWith("net6") || 
+                tfmLower.StartsWith("net7") || tfmLower.StartsWith("net8") ||
+                tfmLower.StartsWith("net9") || tfmLower.StartsWith("net10"))
+            {
+                return "Microsoft.NETCore.App.Ref";
+            }
+        }
+        
+        if (tfmLower.StartsWith("netcoreapp"))
+        {
+            return "Microsoft.NETCore.App.Ref";
+        }
+        
+        if (tfmLower.StartsWith("netstandard"))
+        {
+            return "NETStandard.Library.Ref";
+        }
+        
+        // .NET Framework doesn't have NuGet reference packs
+        return null;
+    }
+
+    private string? ExtractVersionFromTfm(string targetFramework)
+    {
+        // Extract version number from TFM
+        // e.g., net8.0 -> 8.0, netcoreapp3.1 -> 3.1
+        
+        var tfm = targetFramework.ToLowerInvariant();
+        
+        if (tfm.StartsWith("net"))
+        {
+            var versionPart = tfm.Substring(3);
+            
+            // Remove "standard", "coreapp", etc.
+            versionPart = versionPart.Replace("standard", "").Replace("coreapp", "");
+            
+            // Parse the version
+            if (versionPart.Contains("."))
+            {
+                return versionPart;
+            }
+            else if (versionPart.Length > 0)
+            {
+                // Handle cases like net6 -> 6.0
+                if (int.TryParse(versionPart, out var major))
+                {
+                    return $"{major}.0";
+                }
+            }
+        }
+        
+        return null;
+    }
+
+    private NuGetVersion? FindBestMatchingVersion(IEnumerable<NuGetVersion> versions, string? targetVersion)
+    {
+        var versionList = versions.Where(v => !v.IsPrerelease).OrderByDescending(v => v).ToList();
+        
+        if (versionList.Count == 0)
+        {
+            return null;
+        }
+        
+        if (string.IsNullOrEmpty(targetVersion))
+        {
+            return versionList.First();
+        }
+
+        // Try to find a version matching the target
+        foreach (var version in versionList)
+        {
+            if (version.ToString().StartsWith(targetVersion))
+            {
+                return version;
+            }
+        }
+        
+        // Return latest
+        return versionList.First();
+    }
+
+    private async Task DownloadNuGetPackageRecursivelyAsync(
+        string packageId, 
+        string versionString, 
+        string referencesDir,
+        string? targetFramework)
+    {
+        var packageKey = $"{packageId}/{versionString}";
+        if (_downloadedPackages.Contains(packageKey))
+        {
+            return; // Already downloaded
+        }
+
+        AnsiConsole.MarkupLine($"  [yellow]→[/] Downloading NuGet package [cyan]{packageId}[/] [dim]{versionString}[/]...");
+        
+        try
+        {
+            var cache = new SourceCacheContext();
+            var repository = Repository.Factory.GetCoreV3("https://api.nuget.org/v3/index.json");
+            var resource = await repository.GetResourceAsync<FindPackageByIdResource>();
+
+            var version = NuGetVersion.Parse(versionString);
+            var packagePath = Path.Combine(referencesDir, $"{packageId}.{version}.nupkg");
+            
+            // Check if already exists
+            if (File.Exists(packagePath))
+            {
+                AnsiConsole.MarkupLine($"    [green]✓[/] Package already downloaded");
+                _downloadedPackages.Add(packageKey);
+                
+                // Still need to process dependencies
+                await ProcessPackageDependenciesAsync(packagePath, referencesDir, targetFramework);
+                return;
+            }
+
+            using var packageStream = File.Create(packagePath);
+            var success = await resource.CopyNupkgToStreamAsync(
+                packageId,
+                version,
+                packageStream,
+                cache,
+                _logger,
+                CancellationToken.None);
+
+            if (success)
+            {
+                packageStream.Close();
+                AnsiConsole.MarkupLine($"    [green]✓[/] Downloaded {packageId} {version}");
+                _downloadedPackages.Add(packageKey);
+                
+                // Extract package to get assemblies
+                var extractPath = Path.Combine(referencesDir, $"{packageId}.{version}");
+                if (!Directory.Exists(extractPath))
+                {
+                    ZipFile.ExtractToDirectory(packagePath, extractPath);
+                }
+                
+                // Recursively process dependencies
+                await ProcessPackageDependenciesAsync(packagePath, referencesDir, targetFramework);
+            }
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"    [yellow]⚠[/] Failed to download {packageId}: [dim]{ex.Message}[/]");
+        }
+    }
+
+    private async Task ProcessPackageDependenciesAsync(string packagePath, string referencesDir, string? targetFramework)
+    {
+        try
+        {
+            using var packageReader = new PackageArchiveReader(packagePath);
+            var nuspecReader = await packageReader.GetNuspecReaderAsync(CancellationToken.None);
+            
+            // Get dependency groups
+            var dependencyGroups = nuspecReader.GetDependencyGroups();
+            
+            // Find the best matching dependency group for the target framework
+            NuGetFramework? targetNuGetFramework = null;
+            if (targetFramework != null)
+            {
+                targetNuGetFramework = NuGetFramework.Parse(targetFramework);
+            }
+            
+            foreach (var depGroup in dependencyGroups)
+            {
+                // If we have a target framework, only process matching dependencies
+                if (targetNuGetFramework != null)
+                {
+                    // Use a simple compatibility check
+                    if (!IsCompatibleFramework(depGroup.TargetFramework, targetNuGetFramework))
+                    {
+                        continue;
+                    }
+                }
+                
+                foreach (var dependency in depGroup.Packages)
+                {
+                    // Resolve the version range to a specific version
+                    var specificVersion = await ResolveVersionRangeAsync(dependency.Id, dependency.VersionRange);
+                    if (specificVersion != null)
+                    {
+                        await DownloadNuGetPackageRecursivelyAsync(
+                            dependency.Id,
+                            specificVersion,
+                            referencesDir,
+                            targetFramework);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"    [dim]Note: Could not process dependencies: {ex.Message}[/]");
+        }
+    }
+
+    private bool IsCompatibleFramework(NuGetFramework packageFramework, NuGetFramework targetFramework)
+    {
+        // Simple compatibility check
+        // A more robust solution would use NuGet's FrameworkReducer
+        
+        // If package is netstandard, it's compatible with most frameworks
+        if (packageFramework.Framework.Equals("netstandard", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        
+        // If package is .NETCoreApp and target is .NET 5+, check version compatibility
+        if (packageFramework.Framework.Equals(targetFramework.Framework, StringComparison.OrdinalIgnoreCase))
+        {
+            return packageFramework.Version <= targetFramework.Version;
+        }
+        
+        // If no specific target, accept all
+        if (packageFramework.IsAny || packageFramework.IsAgnostic)
+        {
+            return true;
+        }
+        
+        return false;
+    }
+
+    private async Task<string?> ResolveVersionRangeAsync(string packageId, NuGet.Versioning.VersionRange versionRange)
+    {
+        try
+        {
+            var cache = new SourceCacheContext();
+            var repository = Repository.Factory.GetCoreV3("https://api.nuget.org/v3/index.json");
+            var resource = await repository.GetResourceAsync<FindPackageByIdResource>();
+
+            var versions = await resource.GetAllVersionsAsync(
+                packageId,
+                cache,
+                _logger,
+                CancellationToken.None);
+
+            // Find the best version that satisfies the range
+            var matchingVersions = versions
+                .Where(v => versionRange.Satisfies(v))
+                .OrderByDescending(v => v)
+                .ToList();
+
+            // Prefer stable versions
+            var stableVersion = matchingVersions.FirstOrDefault(v => !v.IsPrerelease);
+            if (stableVersion != null)
+            {
+                return stableVersion.ToString();
+            }
+
+            // Fall back to any version
+            return matchingVersions.FirstOrDefault()?.ToString();
+        }
+        catch
+        {
+            // If we can't resolve, use the minimum version if specified
+            return versionRange.MinVersion?.ToString();
         }
     }
 

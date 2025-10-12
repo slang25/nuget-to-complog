@@ -10,10 +10,9 @@ public class MetadataReferenceParserTests
     {
         // Arrange - Create a simple metadata reference blob
         // Format: count (1), filename length, filename, alias count (0), properties (0)
-        var blob = CreateMetadataReferenceBlob(new[]
-        {
-            ("System.Runtime.dll", Array.Empty<string>(), false)
-        });
+        var blob = CreateMetadataReferenceBlob([
+            ("System.Runtime.dll", [], false)
+        ]);
 
         // Act
         var references = MetadataReferenceParser.Parse(blob);
@@ -30,12 +29,11 @@ public class MetadataReferenceParserTests
     public void Parse_MultipleReferences_ReturnsAllReferences()
     {
         // Arrange
-        var blob = CreateMetadataReferenceBlob(new[]
-        {
-            ("System.Runtime.dll", Array.Empty<string>(), false),
-            ("System.Collections.dll", Array.Empty<string>(), false),
-            ("Newtonsoft.Json.dll", Array.Empty<string>(), false)
-        });
+        var blob = CreateMetadataReferenceBlob([
+            ("System.Runtime.dll", [], false),
+            ("System.Collections.dll", [], false),
+            ("Newtonsoft.Json.dll", [], false)
+        ]);
 
         // Act
         var references = MetadataReferenceParser.Parse(blob);
@@ -51,11 +49,10 @@ public class MetadataReferenceParserTests
     public void Parse_ReferenceWithAlias_ReturnsAliases()
     {
         // Arrange
-        var blob = CreateMetadataReferenceBlob(new[]
-        {
-            ("System.Runtime.dll", new[] { "global" }, false),
-            ("MyLib.dll", new[] { "mylib", "lib2" }, false)
-        });
+        var blob = CreateMetadataReferenceBlob([
+            ("System.Runtime.dll", ["global"], false),
+            ("MyLib.dll", ["mylib", "lib2"], false)
+        ]);
 
         // Act
         var references = MetadataReferenceParser.Parse(blob);
@@ -73,11 +70,10 @@ public class MetadataReferenceParserTests
     public void Parse_ReferenceWithEmbedInteropTypes_ReturnsCorrectProperty()
     {
         // Arrange
-        var blob = CreateMetadataReferenceBlob(new[]
-        {
-            ("System.Runtime.dll", Array.Empty<string>(), false),
-            ("Interop.dll", Array.Empty<string>(), true)
-        });
+        var blob = CreateMetadataReferenceBlob([
+            ("System.Runtime.dll", [], false),
+            ("Interop.dll", [], true)
+        ]);
 
         // Act
         var references = MetadataReferenceParser.Parse(blob);
@@ -94,10 +90,9 @@ public class MetadataReferenceParserTests
         // Arrange - Use a very long file path that requires multi-byte length encoding
         var longPath = "/very/long/path/to/some/assembly/that/has/a/really/long/name/" + 
                        new string('x', 200) + ".dll";
-        var blob = CreateMetadataReferenceBlob(new[]
-        {
-            (longPath, Array.Empty<string>(), false)
-        });
+        var blob = CreateMetadataReferenceBlob([
+            (longPath, [], false)
+        ]);
 
         // Act
         var references = MetadataReferenceParser.Parse(blob);
