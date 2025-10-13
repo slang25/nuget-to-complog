@@ -102,7 +102,8 @@ public class ReferenceAssemblyAcquisitionService
         AnsiConsole.MarkupLine($"  [cyan]NuGet package references:[/] {nugetRefs.Count}");
         AnsiConsole.WriteLine();
 
-        // Acquire framework references
+        // Acquire framework references FIRST
+        // This ensures framework versions take precedence over NuGet package versions
         if (frameworkRefs.Count > 0 && !string.IsNullOrEmpty(targetFramework))
         {
             var frameworkPaths = await AcquireFrameworkReferencesAsync(targetFramework, frameworkRefs);
@@ -113,12 +114,22 @@ public class ReferenceAssemblyAcquisitionService
         }
 
         // Acquire NuGet package references
+        // Skip assemblies that are already provided by framework references
         if (nugetRefs.Count > 0)
         {
             var nugetPaths = await AcquireNuGetReferencesAsync(nugetRefs, targetFramework);
             foreach (var kvp in nugetPaths)
             {
-                acquiredReferences[kvp.Key] = kvp.Value;
+                // Only add if not already present from framework references
+                // This prevents old NuGet package versions from overriding framework versions
+                if (!acquiredReferences.ContainsKey(kvp.Key))
+                {
+                    acquiredReferences[kvp.Key] = kvp.Value;
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine($"  [dim]→ Skipping {kvp.Key} (using framework version)[/]");
+                }
             }
         }
 

@@ -48,18 +48,29 @@ public class PdbCompilerArgumentsExtractor
 
         string? pdbPath = null;
         string? pdbFileName = null;
+        bool hasEmbeddedPdb = false;
+        bool hasReproducibleMarker = false;
 
-        // Check for embedded PDB
+        // Check for embedded PDB and debug directory entries
         await using (var peStream = File.OpenRead(assemblyPath))
         using (var peReader = new PEReader(peStream))
         {
-            var embeddedPdb = peReader.ReadDebugDirectory()
+            var debugEntries = peReader.ReadDebugDirectory().ToList();
+            
+            var embeddedPdb = debugEntries
                 .FirstOrDefault(d => d.Type == DebugDirectoryEntryType.EmbeddedPortablePdb);
 
-            if (embeddedPdb.DataSize > 0)
+            hasEmbeddedPdb = embeddedPdb.DataSize > 0;
+            hasReproducibleMarker = debugEntries.Any(d => d.Type == DebugDirectoryEntryType.Reproducible);
+
+            if (hasEmbeddedPdb)
             {
                 AnsiConsole.MarkupLine("  [green]✓ Found embedded PDB[/]");
-                await ExtractFromEmbeddedPdbAsync(peReader);
+                if (hasReproducibleMarker)
+                {
+                    AnsiConsole.MarkupLine("  [green]✓ Found reproducible/deterministic marker[/]");
+                }
+                await ExtractFromEmbeddedPdbAsync(peReader, hasEmbeddedPdb, hasReproducibleMarker);
                 return;
             }
 
@@ -129,7 +140,7 @@ public class PdbCompilerArgumentsExtractor
         if (pdbPath != null && File.Exists(pdbPath))
         {
             AnsiConsole.MarkupLine($"  [green]✓ Found external PDB:[/] [cyan]{Path.GetFileName(pdbPath)}[/]");
-            await ExtractFromExternalPdbAsync(pdbPath);
+            await ExtractFromExternalPdbAsync(pdbPath, hasEmbeddedPdb, hasReproducibleMarker);
         }
         else
         {
@@ -142,7 +153,7 @@ public class PdbCompilerArgumentsExtractor
         }
     }
 
-    private async Task ExtractFromEmbeddedPdbAsync(PEReader peReader)
+    private async Task ExtractFromEmbeddedPdbAsync(PEReader peReader, bool hasEmbeddedPdb, bool hasReproducibleMarker)
     {
         var embeddedPdb = peReader.ReadDebugDirectory()
             .First(d => d.Type == DebugDirectoryEntryType.EmbeddedPortablePdb);
@@ -150,19 +161,19 @@ public class PdbCompilerArgumentsExtractor
         var pdbProvider = peReader.ReadEmbeddedPortablePdbDebugDirectoryData(embeddedPdb);
         var metadataReader = pdbProvider.GetMetadataReader();
 
-        await ExtractCompilationOptionsAsync(metadataReader);
+        await ExtractCompilationOptionsAsync(metadataReader, hasEmbeddedPdb, hasReproducibleMarker);
     }
 
-    private async Task ExtractFromExternalPdbAsync(string pdbPath)
+    private async Task ExtractFromExternalPdbAsync(string pdbPath, bool hasEmbeddedPdb, bool hasReproducibleMarker)
     {
         await using var pdbStream = File.OpenRead(pdbPath);
         using var metadataReaderProvider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
         var metadataReader = metadataReaderProvider.GetMetadataReader();
 
-        await ExtractCompilationOptionsAsync(metadataReader);
+        await ExtractCompilationOptionsAsync(metadataReader, hasEmbeddedPdb, hasReproducibleMarker);
     }
 
-    private async Task ExtractCompilationOptionsAsync(MetadataReader metadataReader)
+    private async Task ExtractCompilationOptionsAsync(MetadataReader metadataReader, bool hasEmbeddedPdb, bool hasReproducibleMarker)
     {
         AnsiConsole.WriteLine();
         
@@ -188,6 +199,21 @@ public class PdbCompilerArgumentsExtractor
                     .AddColumn("[yellow]Compiler Arguments[/]");
                 
                 var args = ParseCompilerArguments(options);
+                
+                // Add debug flags based on PE debug directory entries
+                // These are not stored in the compilation options blob but are needed for recompilation
+                if (hasEmbeddedPdb)
+                {
+                    args.Add("/debug:embedded");
+                    AnsiConsole.MarkupLine("  [dim]→ Added /debug:embedded (detected from PE debug directory)[/]");
+                }
+                
+                if (hasReproducibleMarker)
+                {
+                    args.Add("/deterministic+");
+                    AnsiConsole.MarkupLine("  [dim]→ Added /deterministic+ (detected from PE debug directory)[/]");
+                }
+                
                 _compilerArguments.AddRange(args); // Store for later use
                 foreach (var arg in args)
                 {
@@ -562,10 +588,10 @@ public class PdbCompilerArgumentsExtractor
         return fullPath;
     }
 
-    private string[] ParseCompilerArguments(string options)
+    private List<string> ParseCompilerArguments(string options)
     {
         // Compiler arguments are stored as null-terminated strings
-        return options.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        return options.Split('\0', StringSplitOptions.RemoveEmptyEntries).ToList();
     }
 
     private async Task ParseMetadataReferencesAsync(BlobReader blobReader)

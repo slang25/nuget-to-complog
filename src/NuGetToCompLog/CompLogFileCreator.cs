@@ -194,10 +194,31 @@ public class CompLogFileCreator
     private static Dictionary<string, string> ParseCompilerArgumentsFile(string[] lines)
     {
         var dict = new Dictionary<string, string>();
-        for (int i = 0; i < lines.Length - 1; i += 2)
+        var extraArgs = new List<string>();
+        
+        for (int i = 0; i < lines.Length; i++)
         {
-            dict[lines[i]] = lines[i + 1];
+            // Check if this line is a command-line argument (starts with /)
+            if (lines[i].StartsWith('/'))
+            {
+                extraArgs.Add(lines[i]);
+                continue;
+            }
+            
+            // Otherwise treat as key-value pair
+            if (i < lines.Length - 1)
+            {
+                dict[lines[i]] = lines[i + 1];
+                i++; // Skip next line as it's the value
+            }
         }
+        
+        // Store extra args in a special key if present
+        if (extraArgs.Count > 0)
+        {
+            dict["__extra_args__"] = string.Join(" ", extraArgs);
+        }
+        
         return dict;
     }
 
@@ -247,7 +268,8 @@ public class CompLogFileCreator
         {
             // Skip metadata fields
             if (kvp.Key == "source-file-count" || kvp.Key == "version" || 
-                kvp.Key == "compiler-version" || kvp.Key == "language") 
+                kvp.Key == "compiler-version" || kvp.Key == "language" ||
+                kvp.Key == "__extra_args__") 
                 continue;
             
             // Map output-kind to /target
@@ -284,6 +306,12 @@ public class CompLogFileCreator
             };
             
             args.Add($"/{argName}:{kvp.Value}");
+        }
+
+        // Add extra command-line arguments (like /debug:embedded, /deterministic+)
+        if (argsDict.TryGetValue("__extra_args__", out var extraArgs))
+        {
+            args.AddRange(extraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries));
         }
 
         // Add reference assemblies
