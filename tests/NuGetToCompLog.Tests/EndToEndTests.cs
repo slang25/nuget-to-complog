@@ -27,7 +27,7 @@ public class EndToEndTests
             // Download a known package with embedded PDB (e.g., Newtonsoft.Json)
             var packagePath = await DownloadPackageAsync("Newtonsoft.Json", "13.0.3", tempDir);
             var extractPath = Path.Combine(tempDir, "extracted");
-            ZipFile.ExtractToDirectory(packagePath, extractPath);
+            await ZipFile.ExtractToDirectoryAsync(packagePath, extractPath);
 
             // Find the .NET 6.0 assembly (should have embedded PDB)
             var dllPath = Path.Combine(extractPath, "lib", "net6.0", "Newtonsoft.Json.dll");
@@ -43,7 +43,7 @@ public class EndToEndTests
             Assert.True(File.Exists(dllPath));
 
             // Act - Extract metadata references from the PDB
-            using var peStream = File.OpenRead(dllPath);
+            await using var peStream = File.OpenRead(dllPath);
             using var peReader = new PEReader(peStream);
             
             var embeddedPdb = peReader.ReadDebugDirectory()
@@ -90,7 +90,7 @@ public class EndToEndTests
         }
     }
 
-    private async Task<string> DownloadPackageAsync(string packageId, string versionString, string outputDir)
+    private static async Task<string> DownloadPackageAsync(string packageId, string versionString, string outputDir)
     {
         var cache = new SourceCacheContext();
         var repository = Repository.Factory.GetCoreV3("https://api.nuget.org/v3/index.json");
@@ -98,7 +98,7 @@ public class EndToEndTests
         var version = NuGetVersion.Parse(versionString);
         var packagePath = Path.Combine(outputDir, $"{packageId}.{version}.nupkg");
 
-        using var packageStream = File.Create(packagePath);
+        await using var packageStream = File.Create(packagePath);
         var success = await resource.CopyNupkgToStreamAsync(
             packageId,
             version,

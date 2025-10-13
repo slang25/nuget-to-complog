@@ -82,11 +82,12 @@ public class CompilerArgumentsExtractor
 
             // Select the best TFM
             var assemblies = SelectBestTargetFramework(allAssemblies, extractPath);
+            string? selectedTfm = null;
             if (assemblies.Count > 0)
             {
                 var relativePath = Path.GetRelativePath(extractPath, assemblies[0]);
                 var parts = relativePath.Split(Path.DirectorySeparatorChar);
-                var selectedTfm = parts.Length > 1 ? parts[1] : "unknown";
+                selectedTfm = parts.Length > 1 ? parts[1] : "unknown";
                 AnsiConsole.MarkupLine($"[green]✓[/] Selected best TFM: [cyan]{selectedTfm}[/] with [yellow]{assemblies.Count}[/] assemblies");
                 AnsiConsole.WriteLine();
             }
@@ -138,13 +139,10 @@ public class CompilerArgumentsExtractor
             }
 
             // Step 5: Process each assembly to extract compiler arguments
+            AnsiConsole.MarkupLine($"  [cyan]→[/] Processing {assemblies.Count} assembly/assemblies from TFM: [yellow]{selectedTfm}[/]");
             foreach (var assemblyPath in assemblies)
             {
-                var assemblyPanel = new Panel($"[cyan]{Path.GetFileName(assemblyPath)}[/]")
-                    .Header("[yellow]Analyzing Assembly[/]")
-                    .BorderColor(Color.Yellow)
-                    .Expand();
-                AnsiConsole.Write(assemblyPanel);
+                AnsiConsole.MarkupLine($"     Assembly: [dim]{assemblyPath}[/]");
                 
                 var pdbExtractor = new PdbCompilerArgumentsExtractor();
                 await pdbExtractor.ExtractCompilerArgumentsAsync(assemblyPath, _workingDirectory);
@@ -152,53 +150,21 @@ public class CompilerArgumentsExtractor
                 AnsiConsole.WriteLine();
             }
 
-            // Step 6: Output next steps and considerations
-            var nextStepsPanel = new Panel(
-                new Markup(@"[yellow]TODO: Implement the following to create a complete complog:[/]
-
-[cyan]1. DEPENDENCY RESOLUTION:[/]
-   • Parse the .nuspec file from the extracted package
-   • Recursively download all package dependencies based on target framework
-   • Handle dependency version ranges and resolve to specific versions
-   • Consider using NuGet.DependencyResolver or NuGet.Packaging APIs
-
-[cyan]2. FRAMEWORK ASSEMBLIES:[/]
-   • Identify the target framework from compiler arguments (e.g., net8.0, netstandard2.0)
-   • Download or locate the reference assemblies for that framework
-   • Options:
-     a) Use NuGet.Frameworks to identify framework
-     b) Download reference assemblies from nuget.org (e.g., Microsoft.NETCore.App.Ref)
-     c) Use local SDK reference assemblies if available
-   
-[cyan]3. SOURCE CODE EXTRACTION:[/]
-   • Source files may be embedded in the PDB (Embedded Source)
-   • Or referenced via Source Link URLs (need to download from git repos)
-   • Parse Source Link JSON from PDB to map files to URLs
-   • Download source files and preserve directory structure
-
-[cyan]4. COMPLOG PACKAGING:[/]
-   • Create a standardized directory structure
-   • Package all references, sources, and compiler arguments
-   • Ensure deterministic/reproducible build capability
-   • Consider compression format (zip, tar.gz, or custom)
-
-[cyan]5. VALIDATION:[/]
-   • Verify we have all required references
-   • Check that source files match the compiled assembly
-   • Validate compiler arguments are complete
-   • Test that we can recreate the Roslyn workspace
-
-[yellow]LIMITATIONS TO HANDLE:[/]
-• Not all packages are built with deterministic builds enabled
-• Not all packages include symbols (PDB files)
-• Some packages may have embedded PDBs in assemblies
-• Source Link may not be configured or repos may be private
-• Multi-targeting packages (need to pick or process all TFMs)"))
-                .Header("[green]Next Steps for CompLog Creation[/]")
-                .BorderColor(Color.Green)
-                .Expand();
+            // Step 6: Create CompLog structure with ONLY the selected assemblies
+            var complogStructurePath = CompLogCreator.CreateCompLogStructure(
+                packageId, 
+                version ?? "latest", 
+                _workingDirectory,
+                null, // output directory (use default)
+                assemblies); // Pass the selected assemblies
             
-            AnsiConsole.Write(nextStepsPanel);
+            // Step 7: Create actual .complog file using the SELECTED TFM (not the one from PDB)
+            var complogFilePath = await CompLogFileCreator.CreateCompLogFileAsync(
+                packageId,
+                version ?? "latest",
+                _workingDirectory,
+                Directory.GetCurrentDirectory(),
+                selectedTfm); // Pass the selected TFM
         }
         catch (Exception ex)
         {
@@ -236,7 +202,7 @@ public class CompilerArgumentsExtractor
 
         var packagePath = Path.Combine(_workingDirectory, $"{packageId}.{version}.nupkg");
 
-        using var packageStream = File.Create(packagePath);
+        await using var packageStream = File.Create(packagePath);
         var success = await resource.CopyNupkgToStreamAsync(
             packageId,
             version,
@@ -301,7 +267,7 @@ public class CompilerArgumentsExtractor
                 var response = await httpClient.GetAsync(snupkgUrl);
                 if (response.IsSuccessStatusCode)
                 {
-                    using var fileStream = File.Create(snupkgPath);
+                    await using var fileStream = File.Create(snupkgPath);
                     await response.Content.CopyToAsync(fileStream);
                     return snupkgPath;
                 }

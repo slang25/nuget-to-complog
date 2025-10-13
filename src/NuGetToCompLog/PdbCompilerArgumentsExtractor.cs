@@ -29,13 +29,17 @@ namespace NuGetToCompLog;
 public class PdbCompilerArgumentsExtractor
 {
     private readonly ILogger _logger = NullLogger.Instance;
-    private readonly HashSet<string> _downloadedPackages = new();
-    private readonly HashSet<string> _downloadedFrameworkPacks = new();
+    private readonly HashSet<string> _downloadedPackages = [];
+    private readonly HashSet<string> _downloadedFrameworkPacks = [];
     private string _workingDirectory = "";
+    private List<string> _compilerArguments = [];
+    private List<string> _metadataReferences = [];
     
     public async Task ExtractCompilerArgumentsAsync(string assemblyPath, string workingDirectory)
     {
         _workingDirectory = workingDirectory;
+        _compilerArguments = [];
+        _metadataReferences = [];
         
         // Try three approaches to find the PDB:
         // 1. Embedded PDB in the assembly
@@ -46,7 +50,7 @@ public class PdbCompilerArgumentsExtractor
         string? pdbFileName = null;
 
         // Check for embedded PDB
-        using (var peStream = File.OpenRead(assemblyPath))
+        await using (var peStream = File.OpenRead(assemblyPath))
         using (var peReader = new PEReader(peStream))
         {
             var embeddedPdb = peReader.ReadDebugDirectory()
@@ -71,6 +75,21 @@ public class PdbCompilerArgumentsExtractor
 
                 // Try to find the PDB file
                 pdbPath = FindExternalPdb(assemblyPath, pdbFileName, workingDirectory);
+                
+                if (pdbPath != null)
+                {
+                    // Show which PDB was found and its path to verify TFM matching
+                    var workingDirPath = Path.Combine(workingDirectory, "symbols");
+                    if (pdbPath.StartsWith(workingDirPath))
+                    {
+                        var relativePdbPath = Path.GetRelativePath(workingDirPath, pdbPath);
+                        AnsiConsole.MarkupLine($"  [green]✓[/] Found PDB in symbols: [dim]{relativePdbPath}[/]");
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine($"  [green]✓[/] Found external PDB: [dim]{Path.GetFileName(pdbPath)}[/]");
+                    }
+                }
             }
         }
 
@@ -89,6 +108,20 @@ public class PdbCompilerArgumentsExtractor
                 {
                     // Try to find the PDB again after downloading symbols
                     pdbPath = FindExternalPdb(assemblyPath, pdbFileName, workingDirectory);
+                    
+                    if (pdbPath != null)
+                    {
+                        // Show which PDB was found and its path to verify TFM matching
+                        if (pdbPath.StartsWith(symbolsDir))
+                        {
+                            var relativePdbPath = Path.GetRelativePath(symbolsDir, pdbPath);
+                            AnsiConsole.MarkupLine($"  [green]✓[/] Found PDB in symbols: [dim]{relativePdbPath}[/]");
+                        }
+                        else
+                        {
+                            AnsiConsole.MarkupLine($"  [green]✓[/] Found external PDB: [dim]{Path.GetFileName(pdbPath)}[/]");
+                        }
+                    }
                 }
             }
         }
@@ -155,12 +188,17 @@ public class PdbCompilerArgumentsExtractor
                     .AddColumn("[yellow]Compiler Arguments[/]");
                 
                 var args = ParseCompilerArguments(options);
+                _compilerArguments.AddRange(args); // Store for later use
                 foreach (var arg in args)
                 {
                     argsTable.AddRow($"[cyan]{arg}[/]");
                 }
                 AnsiConsole.Write(argsTable);
                 AnsiConsole.WriteLine();
+                
+                // Save compiler arguments to file
+                var compilerArgsPath = Path.Combine(_workingDirectory, "compiler-arguments.txt");
+                await File.WriteAllLinesAsync(compilerArgsPath, args);
             }
 
             // CompilationMetadataReferences GUID: {7E4D4708-096E-4C5C-AEDA-CB10BA6A740D}
@@ -477,25 +515,42 @@ public class PdbCompilerArgumentsExtractor
 
     private string SaveSourceFile(string sourcesDir, string originalPath, string content)
     {
-        // Sanitize the path and create a safe file structure
-        // Convert absolute paths to relative and remove drive letters
-        var sanitizedPath = originalPath
-            .Replace('\\', '/')
-            .TrimStart('/');
-
-        // Remove drive letter if present (e.g., C:/)
-        if (sanitizedPath.Length > 2 && sanitizedPath[1] == ':')
+        // Save the source file with a flattened structure
+        // We want files to end up directly under /src/ in the complog export
+        // So we strip any leading path components and just keep the file structure
+        
+        // Normalize path separators
+        var normalizedPath = originalPath.Replace('\\', '/');
+        
+        // Remove leading slash if present
+        normalizedPath = normalizedPath.TrimStart('/');
+        
+        // Strip common prefixes like "_/Src/" or "_/src/" or just preserve after last known root
+        // Patterns we want to remove: _/Src/, _/src/, Src/, src/
+        var patterns = new[] { "_/Src/", "_/src/", "Src/", "src/" };
+        foreach (var pattern in patterns)
         {
-            sanitizedPath = sanitizedPath.Substring(2).TrimStart('/');
+            var idx = normalizedPath.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0)
+            {
+                // Take everything after the pattern, including package subdirectory
+                normalizedPath = normalizedPath.Substring(idx + pattern.Length);
+                break;
+            }
         }
-
-        // Remove leading path markers like /_/
-        if (sanitizedPath.StartsWith("_/"))
+        
+        // Now normalizedPath might be like "Newtonsoft.Json/JsonConvert.cs"
+        // We want to strip the first directory component to get just "JsonConvert.cs"
+        // or preserve subfolders within the library
+        var parts = normalizedPath.Split('/');
+        if (parts.Length > 1)
         {
-            sanitizedPath = sanitizedPath.Substring(2);
+            // Skip the first part (package name) and keep the rest
+            normalizedPath = string.Join("/", parts.Skip(1));
         }
-
-        var fullPath = Path.Combine(sourcesDir, sanitizedPath);
+        
+        // Create the full output path within sources directory
+        var fullPath = Path.Combine(sourcesDir, normalizedPath);
         var directory = Path.GetDirectoryName(fullPath);
         
         if (directory != null)
@@ -518,6 +573,9 @@ public class PdbCompilerArgumentsExtractor
         try
         {
             var references = MetadataReferenceParser.Parse(blobReader);
+            
+            // Store references for later use
+            _metadataReferences.AddRange(references.Select(r => r.FileName));
             
             var refsTable = new Table()
                 .BorderColor(Color.Grey)
@@ -546,6 +604,10 @@ public class PdbCompilerArgumentsExtractor
                 AnsiConsole.MarkupLine($"[dim]... and {references.Count - 50} more references[/]");
             }
             AnsiConsole.MarkupLine($"  [dim]Total: {references.Count} references[/]");
+            
+            // Save metadata references to file
+            var referencesPath = Path.Combine(_workingDirectory, "metadata-references.txt");
+            await File.WriteAllLinesAsync(referencesPath, _metadataReferences);
 
             // Acquire all reference assemblies and download dependent NuGet packages
             await AcquireReferenceAssembliesAsync(references, _workingDirectory);
@@ -694,7 +756,7 @@ public class PdbCompilerArgumentsExtractor
         
         if (packagesIndex >= 0)
         {
-            var afterPackages = path.Substring(packagesIndex + "/.nuget/packages/".Length);
+            var afterPackages = path[(packagesIndex + "/.nuget/packages/".Length)..];
             var parts = afterPackages.Split('/');
             
             if (parts.Length >= 2)
@@ -761,7 +823,7 @@ public class PdbCompilerArgumentsExtractor
                 return;
             }
 
-            using var packageStream = File.Create(packagePath);
+            await using var packageStream = File.Create(packagePath);
             var success = await resource.CopyNupkgToStreamAsync(
                 refPackage,
                 version,
@@ -778,7 +840,7 @@ public class PdbCompilerArgumentsExtractor
                 var extractPath = Path.Combine(referencesDir, $"{refPackage}.{version}");
                 if (!Directory.Exists(extractPath))
                 {
-                    ZipFile.ExtractToDirectory(packagePath, extractPath);
+                    await ZipFile.ExtractToDirectoryAsync(packagePath, extractPath);
                 }
                 
                 AnsiConsole.MarkupLine($"    [green]✓[/] Downloaded {refPackage} {version}");
@@ -914,7 +976,7 @@ public class PdbCompilerArgumentsExtractor
                 return;
             }
 
-            using var packageStream = File.Create(packagePath);
+            await using var packageStream = File.Create(packagePath);
             var success = await resource.CopyNupkgToStreamAsync(
                 packageId,
                 version,
@@ -1061,8 +1123,25 @@ public class PdbCompilerArgumentsExtractor
 
     private string? FindExternalPdb(string assemblyPath, string pdbFileName, string workingDirectory)
     {
+        // Extract the TFM from the assembly path
+        // Assembly path is typically: workingDirectory/extracted/lib/netX.X/PackageName.dll
+        var extractedDir = Path.Combine(workingDirectory, "extracted");
+        string? targetFramework = null;
+        
+        if (assemblyPath.StartsWith(extractedDir))
+        {
+            var relativePath = Path.GetRelativePath(extractedDir, assemblyPath);
+            var parts = relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            // parts[0] = "lib" or "ref"
+            // parts[1] = TFM like "net6.0" or "netstandard2.0"
+            if (parts.Length > 1)
+            {
+                targetFramework = parts[1];
+            }
+        }
+
         // Try multiple locations:
-        // 1. Same directory as assembly
+        // 1. Same directory as assembly (highest priority)
         var assemblyDir = Path.GetDirectoryName(assemblyPath);
         if (assemblyDir != null)
         {
@@ -1071,22 +1150,61 @@ public class PdbCompilerArgumentsExtractor
                 return pdbPath;
         }
 
-        // 2. Symbols package extraction directory
+        // 2. Symbols package extraction directory - prefer matching TFM
         var symbolsDir = Path.Combine(workingDirectory, "symbols");
         if (Directory.Exists(symbolsDir))
         {
             var pdbPaths = Directory.GetFiles(symbolsDir, "*.pdb", SearchOption.AllDirectories);
+            
+            // First, try to find PDB with matching TFM
+            if (targetFramework != null)
+            {
+                var tfmMatch = pdbPaths.FirstOrDefault(p =>
+                {
+                    var name = Path.GetFileName(p);
+                    if (!name.Equals(Path.GetFileName(pdbFileName), StringComparison.OrdinalIgnoreCase))
+                        return false;
+                    
+                    // Check if this PDB is under a directory matching our TFM
+                    var pdbRelativePath = Path.GetRelativePath(symbolsDir, p);
+                    return pdbRelativePath.Contains(targetFramework, StringComparison.OrdinalIgnoreCase);
+                });
+                
+                if (tfmMatch != null)
+                    return tfmMatch;
+            }
+            
+            // Fallback: find any PDB with matching name
             var match = pdbPaths.FirstOrDefault(p => 
                 Path.GetFileName(p).Equals(Path.GetFileName(pdbFileName), StringComparison.OrdinalIgnoreCase));
             if (match != null)
                 return match;
         }
 
-        // 3. Original package extraction directory (some packages include PDBs)
-        var extractedDir = Path.Combine(workingDirectory, "extracted");
+        // 3. Original package extraction directory - prefer matching TFM
         if (Directory.Exists(extractedDir))
         {
             var pdbPaths = Directory.GetFiles(extractedDir, "*.pdb", SearchOption.AllDirectories);
+            
+            // First, try to find PDB with matching TFM
+            if (targetFramework != null)
+            {
+                var tfmMatch = pdbPaths.FirstOrDefault(p =>
+                {
+                    var name = Path.GetFileName(p);
+                    if (!name.Equals(Path.GetFileName(pdbFileName), StringComparison.OrdinalIgnoreCase))
+                        return false;
+                    
+                    // Check if this PDB is under a directory matching our TFM
+                    var pdbRelativePath = Path.GetRelativePath(extractedDir, p);
+                    return pdbRelativePath.Contains(targetFramework, StringComparison.OrdinalIgnoreCase);
+                });
+                
+                if (tfmMatch != null)
+                    return tfmMatch;
+            }
+            
+            // Fallback: find any PDB with matching name
             var match = pdbPaths.FirstOrDefault(p =>
                 Path.GetFileName(p).Equals(Path.GetFileName(pdbFileName), StringComparison.OrdinalIgnoreCase));
             if (match != null)
@@ -1144,7 +1262,7 @@ public class PdbCompilerArgumentsExtractor
                     if (response.IsSuccessStatusCode)
                     {
                         var snupkgPath = Path.Combine(workingDirectory, $"{packageId}.{version}.snupkg");
-                        using (var fileStream = File.Create(snupkgPath))
+                        await using (var fileStream = File.Create(snupkgPath))
                         {
                             await response.Content.CopyToAsync(fileStream);
                         }
@@ -1152,7 +1270,7 @@ public class PdbCompilerArgumentsExtractor
                         // Extract the symbols package
                         var symbolsDir = Path.Combine(workingDirectory, "symbols");
                         Directory.CreateDirectory(symbolsDir);
-                        ZipFile.ExtractToDirectory(snupkgPath, symbolsDir, overwriteFiles: true);
+                        await ZipFile.ExtractToDirectoryAsync(snupkgPath, symbolsDir, overwriteFiles: true);
 
                         var pdbCount = Directory.GetFiles(symbolsDir, "*.pdb", SearchOption.AllDirectories).Length;
                         AnsiConsole.MarkupLine($"    [green]✓ Downloaded and extracted symbols package ({pdbCount} PDB files)[/]");

@@ -24,14 +24,14 @@ public class MetadataReferenceDiagnosticTests
         {
             var packagePath = await DownloadPackageAsync("Newtonsoft.Json", "13.0.3", tempDir);
             var extractPath = Path.Combine(tempDir, "extracted");
-            ZipFile.ExtractToDirectory(packagePath, extractPath);
+            await ZipFile.ExtractToDirectoryAsync(packagePath, extractPath);
 
             // Download symbols
             var snupkgPath = await DownloadSymbolsPackageAsync("Newtonsoft.Json", "13.0.3", tempDir);
             if (snupkgPath != null)
             {
                 var symbolsPath = Path.Combine(tempDir, "symbols");
-                ZipFile.ExtractToDirectory(snupkgPath, symbolsPath);
+                await ZipFile.ExtractToDirectoryAsync(snupkgPath, symbolsPath);
 
                 // Find a PDB
                 var pdbFiles = Directory.GetFiles(symbolsPath, "*.pdb", SearchOption.AllDirectories);
@@ -66,7 +66,7 @@ public class MetadataReferenceDiagnosticTests
                                 for (int j = 0; j < 16 && i + j < blob.Length; j++)
                                 {
                                     var b = blob[i + j];
-                                    Console.Write(b >= 32 && b < 127 ? (char)b : '.');
+                                    Console.Write(b is >= 32 and < 127 ? (char)b : '.');
                                 }
                                 Console.WriteLine();
                             }
@@ -92,7 +92,7 @@ public class MetadataReferenceDiagnosticTests
         var version = NuGetVersion.Parse(versionString);
         var packagePath = Path.Combine(outputDir, $"{packageId}.{version}.nupkg");
 
-        using var packageStream = File.Create(packagePath);
+        await using var packageStream = File.Create(packagePath);
         await resource.CopyNupkgToStreamAsync(packageId, version, packageStream, cache,
             NullLogger.Instance, CancellationToken.None);
 
@@ -118,7 +118,7 @@ public class MetadataReferenceDiagnosticTests
                 var response = await httpClient.GetAsync(url);
                 if (response.IsSuccessStatusCode)
                 {
-                    using var fileStream = File.Create(snupkgPath);
+                    await using var fileStream = File.Create(snupkgPath);
                     await response.Content.CopyToAsync(fileStream);
                     return snupkgPath;
                 }
