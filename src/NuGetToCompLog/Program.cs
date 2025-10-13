@@ -1,4 +1,6 @@
-﻿using NuGetToCompLog;
+﻿using Microsoft.Extensions.DependencyInjection;
+using NuGetToCompLog;
+using NuGetToCompLog.Commands;
 using Spectre.Console;
 
 // Display fancy header
@@ -8,6 +10,30 @@ AnsiConsole.Write(
         .Color(Color.Cyan1));
 
 if (args.Length < 1 || args[0] == "--help" || args[0] == "-h" || args[0] == "/?")
+{
+    DisplayHelp();
+    return args.Length < 1 ? 1 : 0;
+}
+
+// Parse command
+string packageId = args[0];
+string? version = args.Length > 1 ? args[1] : null;
+var command = new ProcessPackageCommand(packageId, version);
+
+// Set up dependency injection
+var services = new ServiceCollection();
+services.AddNuGetToCompLogServices();
+
+using var serviceProvider = services.BuildServiceProvider();
+
+// Execute command
+var handler = serviceProvider.GetRequiredService<ProcessPackageCommandHandler>();
+var result = await handler.HandleAsync(command);
+
+return result != null ? 0 : 1;
+
+// Helper method to display help
+static void DisplayHelp()
 {
     var table = new Table()
         .BorderColor(Color.Grey)
@@ -34,13 +60,4 @@ if (args.Length < 1 || args[0] == "--help" || args[0] == "-h" || args[0] == "/?"
     AnsiConsole.MarkupLine("  [dim]$[/] [cyan]NuGetToCompLog[/] [green]Microsoft.Extensions.Logging[/]");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[dim]For more information, see README.md[/]");
-    return args.Length < 1 ? 1 : 0;
 }
-
-string packageId = args[0];
-string? version = args.Length > 1 ? args[1] : null;
-
-var extractor = new CompilerArgumentsExtractor();
-await extractor.ProcessPackageAsync(packageId, version);
-
-return 0;
