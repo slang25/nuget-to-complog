@@ -17,9 +17,6 @@ public class CompLogStructureCreator
         _console = console;
     }
 
-    /// <summary>
-    /// Creates a structured output directory with all compilation artifacts.
-    /// </summary>
     public string CreateStructure(
         string packageId,
         string version,
@@ -33,22 +30,11 @@ public class CompLogStructureCreator
         _console.WriteLine();
         _console.MarkupLine("[yellow]Creating CompLog structure...[/]");
 
-        // Copy sources
         CopySources(workingDirectory, outputPath);
-
-        // Copy resources
         CopyResources(workingDirectory, outputPath);
-
-        // Copy references
         CopyReferences(workingDirectory, outputPath, selectedAssemblies);
-
-        // Copy compiler artifacts
         CopyCompilerArtifacts(workingDirectory, outputPath);
-
-        // Copy symbols
         CopySymbols(workingDirectory, outputPath);
-
-        // Create metadata
         CreateMetadata(packageId, version, outputPath);
 
         DisplaySummary(outputPath);
@@ -95,7 +81,6 @@ public class CompLogStructureCreator
 
         if (selectedAssemblies != null && selectedAssemblies.Count > 0)
         {
-            // Copy only selected assemblies
             foreach (var dll in selectedAssemblies)
             {
                 if (_fileSystem.FileExists(dll))
@@ -108,7 +93,6 @@ public class CompLogStructureCreator
         }
         else
         {
-            // Copy all DLLs from lib and ref folders
             var libDir = Path.Combine(extractedDir, "lib");
             var refDir = Path.Combine(extractedDir, "ref");
 

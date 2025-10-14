@@ -30,14 +30,12 @@ public class PackageExtractionService
     {
         var assemblies = new List<string>();
 
-        // Look in lib folder
         var libPath = Path.Combine(extractPath, "lib");
         if (_fileSystem.DirectoryExists(libPath))
         {
             assemblies.AddRange(_fileSystem.GetFiles(libPath, "*.dll", SearchOption.AllDirectories));
         }
 
-        // Look in ref folder
         var refPath = Path.Combine(extractPath, "ref");
         if (_fileSystem.DirectoryExists(refPath))
         {

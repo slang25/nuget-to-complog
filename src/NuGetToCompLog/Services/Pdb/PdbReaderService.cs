@@ -46,30 +46,22 @@ public class PdbReaderService : IPdbReader
 
         if (pdbPath == null)
         {
-            // Extract from embedded PDB
             isEmbedded = true;
             metadataReader = GetEmbeddedPdbReader(assemblyPath);
         }
         else
         {
-            // Read from external PDB
             metadataReader = await GetExternalPdbReaderAsync(pdbPath);
         }
 
-        // Extract compilation information
         var compilationInfo = await _compilationExtractor.ExtractCompilationInfoAsync(
             metadataReader,
             _discoveryService.HasEmbeddedPdb(assemblyPath),
             hasReproducibleMarker,
             cancellationToken);
 
-        // Extract source files
         var sourceFiles = ExtractSourceFiles(metadataReader);
-
-        // Extract Source Link
         var sourceLinkJson = ExtractSourceLink(metadataReader);
-
-        // Extract embedded resources from assembly
         var embeddedResources = ExtractEmbeddedResources(assemblyPath);
 
         return new PdbMetadata(
@@ -110,7 +102,6 @@ public class PdbReaderService : IPdbReader
             var document = metadataReader.GetDocument(docHandle);
             var name = metadataReader.GetString(document.Name);
 
-            // Check for embedded source
             var embeddedSource = metadataReader.GetCustomDebugInformation(docHandle)
                 .Select(h => metadataReader.GetCustomDebugInformation(h))
                 .Where(cdi => metadataReader.GetGuid(cdi.Kind).ToString()
@@ -120,7 +111,6 @@ public class PdbReaderService : IPdbReader
 
             bool isEmbedded = embeddedSource.HasValue && embeddedSource.Value.Kind != default;
 
-            // Extract embedded content if present
             string? content = null;
             if (isEmbedded && embeddedSource.HasValue)
             {
@@ -186,7 +176,6 @@ public class PdbReaderService : IPdbReader
 
         try
         {
-            // Load assembly to extract manifest resources
             var assembly = System.Reflection.Assembly.LoadFrom(assemblyPath);
             var resourceNames = assembly.GetManifestResourceNames();
 

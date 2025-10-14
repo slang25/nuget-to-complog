@@ -51,15 +51,12 @@ public class ProcessPackageCommandHandler
     {
         try
         {
-            // Display header
             DisplayHeader(command.PackageId, command.Version);
 
-            // Create working directory
             var workingDirectory = _fileSystem.CreateTempDirectory();
             _console.MarkupLine($"[dim]Working directory: {workingDirectory}[/]");
             _console.WriteLine();
 
-            // Step 1: Resolve version if needed
             var version = command.Version;
             if (version == null)
             {
@@ -69,7 +66,6 @@ public class ProcessPackageCommandHandler
 
             var package = new PackageIdentity(command.PackageId, version);
 
-            // Step 2: Download package
             string packagePath = "";
             await _console.ExecuteWithStatusAsync("Downloading package...", async () =>
             {
@@ -78,17 +74,14 @@ public class ProcessPackageCommandHandler
             _console.MarkupLine($"[green]✓[/] Downloaded package to: [dim]{Path.GetFileName(packagePath)}[/]");
             _console.WriteLine();
 
-            // Step 3: Extract package
             var extractPath = Path.Combine(workingDirectory, "extracted");
             await _extractionService.ExtractPackageAsync(packagePath, extractPath);
             _console.MarkupLine("[green]✓[/] Extracted package");
             _console.WriteLine();
 
-            // Step 4: Find assemblies
             var allAssemblies = _extractionService.FindAssemblies(extractPath);
             DisplayAssembliesTree(allAssemblies, extractPath);
 
-            // Step 5: Select best TFM
             var (selectedAssemblies, selectedTfm) = _tfmSelector.SelectBestTargetFramework(allAssemblies, extractPath);
             if (selectedTfm != null)
             {
@@ -96,10 +89,8 @@ public class ProcessPackageCommandHandler
                 _console.WriteLine();
             }
 
-            // Step 6: Try to download symbols
             await TryDownloadSymbolsAsync(package, workingDirectory, cancellationToken);
 
-            // Step 7: Process assemblies to extract compiler arguments
             _console.MarkupLine($"  [cyan]→[/] Processing {selectedAssemblies.Count} assembly/assemblies from TFM: [yellow]{selectedTfm}[/]");
             
             foreach (var assemblyPath in selectedAssemblies)
@@ -109,7 +100,6 @@ public class ProcessPackageCommandHandler
                 _console.WriteLine();
             }
 
-            // Step 8: Create CompLog structure
             var complogStructurePath = _structureCreator.CreateStructure(
                 command.PackageId,
                 version,
@@ -117,16 +107,14 @@ public class ProcessPackageCommandHandler
                 null,
                 selectedAssemblies);
 
-            // Step 9: Create actual .complog file (using existing CompLogFileCreator for now)
             var complogFilePath = await CompLogFileCreator.CreateCompLogFileAsync(
                 command.PackageId,
                 version,
                 workingDirectory,
                 Directory.GetCurrentDirectory(),
                 selectedTfm,
-                selectedAssemblies); // Pass the selected assemblies so we analyze the right one
+                selectedAssemblies);
 
-            // Verify the complog file was actually created
             if (!File.Exists(complogFilePath))
             {
                 _console.MarkupLine("[red]✗[/] CompLog file was not created - check that the package has embedded PDBs with compiler arguments");
@@ -215,7 +203,6 @@ public class ProcessPackageCommandHandler
 
     private async Task ProcessAssemblyAsync(string assemblyPath, string workingDirectory, CancellationToken cancellationToken)
     {
-        // Check for embedded PDB
         var hasEmbeddedPdb = _pdbDiscovery.HasEmbeddedPdb(assemblyPath);
         var hasReproducibleMarker = _pdbDiscovery.HasReproducibleMarker(assemblyPath);
 
@@ -232,7 +219,6 @@ public class ProcessPackageCommandHandler
             return;
         }
 
-        // Look for external PDB
         var pdbPath = await _pdbReader.FindPdbAsync(assemblyPath, workingDirectory);
         if (pdbPath != null)
         {
@@ -252,7 +238,6 @@ public class ProcessPackageCommandHandler
 
     private async Task SaveMetadataAsync(PdbMetadata metadata, string workingDirectory)
     {
-        // Save compiler arguments
         if (metadata.CompilerArguments.Count > 0)
         {
             var compilerArgsPath = Path.Combine(workingDirectory, "compiler-arguments.txt");
@@ -260,7 +245,6 @@ public class ProcessPackageCommandHandler
             _console.MarkupLine($"  [green]✓[/] Saved {metadata.CompilerArguments.Count} compiler arguments");
         }
 
-        // Save metadata references
         if (metadata.MetadataReferences.Count > 0)
         {
             var referencesPath = Path.Combine(workingDirectory, "metadata-references.txt");
@@ -268,40 +252,33 @@ public class ProcessPackageCommandHandler
             _console.MarkupLine($"  [green]✓[/] Saved {metadata.MetadataReferences.Count} metadata references");
         }
 
-        // Save embedded resources
         if (metadata.EmbeddedResources.Count > 0)
         {
             var resourcesDir = Path.Combine(workingDirectory, "resources");
             _fileSystem.CreateDirectory(resourcesDir);
             
-            // Also save a mapping file to preserve original resource names
             var resourceMappings = new List<string>();
             
             foreach (var resource in metadata.EmbeddedResources)
             {
-                // Use the resource name as filename, but sanitize it
                 var fileName = resource.Name.Replace("/", "_").Replace("\\", "_");
                 var filePath = Path.Combine(resourcesDir, fileName);
                 await _fileSystem.WriteAllBytesAsync(filePath, resource.Content);
                 
-                // Save the mapping: sanitizedName -> originalName
                 resourceMappings.Add($"{fileName}|{resource.Name}");
             }
             
-            // Write the resource mapping file
             var mappingPath = Path.Combine(workingDirectory, "resource-mappings.txt");
             await _fileSystem.WriteAllLinesAsync(mappingPath, resourceMappings);
             
             _console.MarkupLine($"  [green]✓[/] Saved {metadata.EmbeddedResources.Count} embedded resource(s)");
         }
 
-        // Save source files
         if (metadata.SourceFiles.Count > 0)
         {
             var sourcesDir = Path.Combine(workingDirectory, "sources");
             _fileSystem.CreateDirectory(sourcesDir);
             
-            // Save embedded sources
             var embeddedCount = 0;
             foreach (var sourceFile in metadata.SourceFiles.Where(sf => sf.HasContent))
             {
@@ -316,7 +293,6 @@ public class ProcessPackageCommandHandler
                 _console.MarkupLine($"  [green]✓[/] Saved {embeddedCount} embedded source files");
             }
 
-            // Download non-embedded sources from Source Link
             if (!string.IsNullOrEmpty(metadata.SourceLinkJson))
             {
                 var downloadedCount = await _sourceDownloader.DownloadSourceFilesAsync(

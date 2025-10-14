@@ -30,7 +30,6 @@ public class CompilationOptionsExtractor
             var cdi = metadataReader.GetCustomDebugInformation(cdiHandle);
             var guid = metadataReader.GetGuid(cdi.Kind);
 
-            // Extract compiler arguments
             if (guid.ToString().Equals(CompilationOptionsGuid, StringComparison.OrdinalIgnoreCase))
             {
                 var blob = metadataReader.GetBlobBytes(cdi.Value);
@@ -38,7 +37,6 @@ public class CompilationOptionsExtractor
 
                 var args = ParseCompilerArguments(options);
 
-                // Add debug flags based on PE debug directory entries
                 if (hasEmbeddedPdb)
                 {
                     args.Add("/debug:embedded");
@@ -51,11 +49,9 @@ public class CompilationOptionsExtractor
 
                 compilerArgs.AddRange(args);
 
-                // Extract target framework from defines
                 targetFramework = ExtractTargetFramework(args);
             }
 
-            // Extract metadata references
             if (guid.ToString().Equals(MetadataReferencesGuid, StringComparison.OrdinalIgnoreCase))
             {
                 var blobReader = metadataReader.GetBlobReader(cdi.Value);
@@ -79,7 +75,6 @@ public class CompilationOptionsExtractor
 
     private string? ExtractTargetFramework(List<string> args)
     {
-        // Look for /define: argument
         var defineArg = args.FirstOrDefault(a => a.StartsWith("/define:", StringComparison.OrdinalIgnoreCase));
         if (defineArg == null)
         {
@@ -91,7 +86,6 @@ public class CompilationOptionsExtractor
         {
             if (define.StartsWith("NET", StringComparison.Ordinal) && define.Contains("_"))
             {
-                // Convert NET8_0 to net8.0
                 return define.Replace("_", ".").ToLowerInvariant();
             }
         }

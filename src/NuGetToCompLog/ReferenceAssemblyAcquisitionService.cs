@@ -82,7 +82,6 @@ public class ReferenceAssemblyAcquisitionService
         AnsiConsole.MarkupLine("[yellow]Acquiring Reference Assemblies:[/]");
         AnsiConsole.MarkupLine($"  [dim]→ Target framework: {targetFramework ?? "unknown"}[/]");
 
-        // Categorize references
         var frameworkRefs = new List<MetadataReference>();
         var nugetRefs = new List<MetadataReference>();
         
@@ -102,8 +101,7 @@ public class ReferenceAssemblyAcquisitionService
         AnsiConsole.MarkupLine($"  [cyan]NuGet package references:[/] {nugetRefs.Count}");
         AnsiConsole.WriteLine();
 
-        // Acquire framework references FIRST
-        // This ensures framework versions take precedence over NuGet package versions
+        // Acquire framework references FIRST to ensure framework versions take precedence over NuGet package versions
         if (frameworkRefs.Count > 0 && !string.IsNullOrEmpty(targetFramework))
         {
             var frameworkPaths = await AcquireFrameworkReferencesAsync(targetFramework, frameworkRefs);
@@ -113,15 +111,12 @@ public class ReferenceAssemblyAcquisitionService
             }
         }
 
-        // Acquire NuGet package references
-        // Skip assemblies that are already provided by framework references
         if (nugetRefs.Count > 0)
         {
             var nugetPaths = await AcquireNuGetReferencesAsync(nugetRefs, targetFramework);
             foreach (var kvp in nugetPaths)
             {
-                // Only add if not already present from framework references
-                // This prevents old NuGet package versions from overriding framework versions
+                // Prevent old NuGet package versions from overriding framework versions
                 if (!acquiredReferences.ContainsKey(kvp.Key))
                 {
                     acquiredReferences[kvp.Key] = kvp.Value;
@@ -146,22 +141,22 @@ public class ReferenceAssemblyAcquisitionService
     {
         var result = new Dictionary<string, string>();
         
-        // For .NET Standard 1.x, the NETStandard.Library package is a meta-package with no DLLs
-        // We need to download individual System.* packages instead
+
+
         if (targetFramework.StartsWith("netstandard1"))
         {
             AnsiConsole.MarkupLine($"  [cyan]→[/] Downloading individual System.* packages for {targetFramework}...");
             return await DownloadIndividualSystemPackagesAsync(targetFramework, frameworkRefs);
         }
         
-        // For other frameworks, try the local SDK first as a fast path
+
         var sdkResult = await TryAcquireFromLocalSdkAsync(targetFramework, frameworkRefs);
         if (sdkResult.Count > 0)
         {
             return sdkResult;
         }
         
-        // Get the reference package for this TFM
+
         if (!_frameworkToPackageMap.TryGetValue(targetFramework, out var packageInfo))
         {
             AnsiConsole.MarkupLine($"  [yellow]⚠[/] No reference package mapping for {targetFramework}");
@@ -172,7 +167,7 @@ public class ReferenceAssemblyAcquisitionService
         var packageId = parts[0];
         var version = parts[1];
 
-        // Check if already downloaded
+
         if (_acquiredPackages.Contains(packageInfo))
         {
             AnsiConsole.MarkupLine($"  [dim]→ Using cached {packageId}[/]");
@@ -183,28 +178,28 @@ public class ReferenceAssemblyAcquisitionService
 
         try
         {
-            // Download the reference package
+
             var packagePath = await DownloadPackageAsync(packageId, version);
             _acquiredPackages.Add(packageInfo);
 
-            // Extract to references directory
+
             var extractPath = Path.Combine(_workingDirectory, "framework-refs", $"{packageId}.{version}");
             Directory.CreateDirectory(extractPath);
             System.IO.Compression.ZipFile.ExtractToDirectory(packagePath, extractPath, overwriteFiles: true);
 
-            // Find reference assemblies in the package
+
             List<string> possiblePaths = new();
             
-            // Try standard ref/{tfm} structure first
+
             possiblePaths.Add(Path.Combine(extractPath, "ref", targetFramework));
-            // Try without patch version (e.g., net6.0 instead of net6.0.0)
+
             if (targetFramework.Contains("."))
             {
                 var tfmWithoutPatch = string.Join(".", targetFramework.Split('.').Take(2));
                 possiblePaths.Add(Path.Combine(extractPath, "ref", tfmWithoutPatch));
             }
             
-            // Try to find DLLs in any of the possible paths
+
             foreach (var refDir in possiblePaths)
             {
                 if (Directory.Exists(refDir))
@@ -247,7 +242,7 @@ public class ReferenceAssemblyAcquisitionService
         var result = new Dictionary<string, string>();
         var packageVersion = "4.3.0"; // Standard version for all System.* packages
         
-        // Get unique package names from the framework references
+
         var packageNames = frameworkRefs
             .Select(r => Path.GetFileNameWithoutExtension(r.FileName))
             .Where(name => name.StartsWith("System.") || name == "Microsoft.CSharp")
@@ -270,12 +265,12 @@ public class ReferenceAssemblyAcquisitionService
                 var packagePath = await DownloadPackageAsync(packageName, packageVersion);
                 _acquiredPackages.Add(packageKey);
                 
-                // Extract package
+
                 var extractPath = Path.Combine(_workingDirectory, "framework-refs", $"{packageName}.{packageVersion}");
                 Directory.CreateDirectory(extractPath);
                 System.IO.Compression.ZipFile.ExtractToDirectory(packagePath, extractPath, overwriteFiles: true);
                 
-                // Find the DLL in ref/{tfm}
+
                 var refPath = Path.Combine(extractPath, "ref", targetFramework);
                 if (Directory.Exists(refPath))
                 {
@@ -293,7 +288,7 @@ public class ReferenceAssemblyAcquisitionService
             }
             catch (Exception)
             {
-                // Package might not exist or have issues - skip it
+
                 continue;
             }
         }
@@ -321,15 +316,15 @@ public class ReferenceAssemblyAcquisitionService
             return result;
         }
 
-        // Try packs directory (for .NET 5+)
+
         var packsDir = Path.Combine(dotnetRoot, "packs");
         if (Directory.Exists(packsDir))
         {
-            // For .NET 5+, look for Microsoft.NETCore.App.Ref
+
             var appRefDir = Path.Combine(packsDir, "Microsoft.NETCore.App.Ref");
             if (Directory.Exists(appRefDir))
             {
-                // Find matching version directory
+
                 var versionDirs = Directory.GetDirectories(appRefDir);
                 foreach (var versionDir in versionDirs.OrderByDescending(d => d))
                 {
@@ -352,7 +347,7 @@ public class ReferenceAssemblyAcquisitionService
                 }
             }
             
-            // For .NET Standard, look for NETStandard.Library.Ref
+
             if (targetFramework.StartsWith("netstandard"))
             {
                 var netstandardRefDir = Path.Combine(packsDir, "NETStandard.Library.Ref");
@@ -395,7 +390,7 @@ public class ReferenceAssemblyAcquisitionService
         var result = new Dictionary<string, string>();
         var packageGroups = new Dictionary<string, (List<MetadataReference> Refs, string? Version)>();
 
-        // Group references by package
+
         foreach (var reference in nugetRefs)
         {
             var packageInfo = ExtractPackageInfoFromPath(reference.FileName);
@@ -414,14 +409,14 @@ public class ReferenceAssemblyAcquisitionService
 
         AnsiConsole.MarkupLine($"  [cyan]→[/] Downloading {packageGroups.Count} NuGet packages and their dependencies...");
 
-        // Recursively resolve all dependencies
+
         var allPackages = new Dictionary<string, string>(); // packageId -> version
         foreach (var kvp in packageGroups)
         {
             var packageId = kvp.Key;
             var version = kvp.Value.Version;
             
-            // If we don't have a version, try to find the latest
+
             if (string.IsNullOrEmpty(version))
             {
                 version = await GetLatestPackageVersionAsync(packageId);
@@ -437,7 +432,7 @@ public class ReferenceAssemblyAcquisitionService
 
         AnsiConsole.MarkupLine($"    [dim]Total packages (including transitive): {allPackages.Count}[/]");
 
-        // Download and extract all packages
+
         foreach (var kvp in allPackages)
         {
             var packageId = kvp.Key;
@@ -454,18 +449,18 @@ public class ReferenceAssemblyAcquisitionService
                 var packagePath = await DownloadPackageAsync(packageId, version);
                 _acquiredPackages.Add(packageKey);
 
-                // Extract package
+
                 var extractPath = Path.Combine(_workingDirectory, "nuget-refs", $"{packageId}.{version}");
                 Directory.CreateDirectory(extractPath);
                 System.IO.Compression.ZipFile.ExtractToDirectory(packagePath, extractPath, overwriteFiles: true);
 
-                // Find assemblies in lib or ref folders
+
                 foreach (var folder in new[] { "lib", "ref" })
                 {
                     var folderPath = Path.Combine(extractPath, folder);
                     if (Directory.Exists(folderPath))
                     {
-                        // Try to find best matching TFM folder
+
                         var tfmFolders = Directory.GetDirectories(folderPath);
                         var bestMatch = SelectBestTfmFolder(tfmFolders, targetFramework);
                         
@@ -539,21 +534,21 @@ public class ReferenceAssemblyAcquisitionService
     {
         var packageKey = $"{packageId}/{version}";
         
-        // Skip if already processed
+
         if (allPackages.ContainsKey(packageId))
         {
             return;
         }
 
-        // Add this package
+
         allPackages[packageId] = version;
 
         try
         {
-            // Download the package
+
             var packagePath = await DownloadPackageAsync(packageId, version);
 
-            // Extract the .nuspec file to read dependencies
+
             var extractPath = Path.Combine(_workingDirectory, "nuget-refs", $"{packageId}.{version}");
             if (!Directory.Exists(extractPath))
             {
@@ -561,7 +556,7 @@ public class ReferenceAssemblyAcquisitionService
                 System.IO.Compression.ZipFile.ExtractToDirectory(packagePath, extractPath, overwriteFiles: true);
             }
 
-            // Read the .nuspec file
+
             var nuspecPath = Directory.GetFiles(extractPath, "*.nuspec", SearchOption.TopDirectoryOnly).FirstOrDefault();
             if (nuspecPath == null)
             {
@@ -570,7 +565,7 @@ public class ReferenceAssemblyAcquisitionService
 
             var dependencies = ParseDependencies(nuspecPath, targetFramework);
             
-            // Recursively resolve each dependency
+
             foreach (var (depId, depVersion) in dependencies)
             {
                 await ResolvePackageDependenciesRecursivelyAsync(depId, depVersion, targetFramework, allPackages);
@@ -578,7 +573,7 @@ public class ReferenceAssemblyAcquisitionService
         }
         catch (Exception)
         {
-            // Skip packages that can't be resolved
+
         }
     }
 
@@ -606,14 +601,14 @@ public class ReferenceAssemblyAcquisitionService
                 return dependencies;
             }
 
-            // Parse target framework
+
             var targetNuGetFramework = NuGetFramework.Parse(targetFramework);
 
-            // Check for framework-specific dependency groups
+
             var groups = dependenciesElement.Elements(ns + "group").ToList();
             if (groups.Any())
             {
-                // Find the best matching group
+
                 var bestGroup = FindBestMatchingDependencyGroup(groups, ns, targetNuGetFramework);
                 if (bestGroup != null)
                 {
@@ -624,7 +619,7 @@ public class ReferenceAssemblyAcquisitionService
                         
                         if (!string.IsNullOrEmpty(id) && !string.IsNullOrEmpty(version))
                         {
-                            // Parse version range and select a specific version
+
                             var versionToUse = ParseVersionRange(version);
                             dependencies.Add((id, versionToUse));
                         }
@@ -706,7 +701,7 @@ public class ReferenceAssemblyAcquisitionService
                 return versionString;
             }
 
-            // Parse version range
+
             var range = VersionRange.Parse(versionString);
             
             // Use minimum version if specified
@@ -825,7 +820,7 @@ public class ReferenceAssemblyAcquisitionService
             "PresentationFramework"
         };
 
-        // Check if it's a framework assembly
+
         if (frameworkPrefixes.Any(prefix => 
             name.Equals(prefix.TrimEnd('.'), StringComparison.OrdinalIgnoreCase) ||
             name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
@@ -847,7 +842,7 @@ public class ReferenceAssemblyAcquisitionService
         // .nuget/packages/{package}/{version}/lib/{tfm}/{assembly}.dll
         var normalizedPath = fileName.Replace('\\', '/').ToLowerInvariant();
         
-        // Check if it has a full path with package cache
+
         if (normalizedPath.Contains("/.nuget/packages/") || normalizedPath.Contains("/packages/"))
         {
             return true;
@@ -909,7 +904,7 @@ public class ReferenceAssemblyAcquisitionService
 
     private string? GetDotNetRoot()
     {
-        // Check environment variable first
+
         var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
         if (!string.IsNullOrEmpty(dotnetRoot) && Directory.Exists(dotnetRoot))
         {

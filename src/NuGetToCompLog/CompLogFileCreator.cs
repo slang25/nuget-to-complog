@@ -18,22 +18,21 @@ public class CompLogFileCreator
         string version,
         string workingDirectory,
         string outputDirectory,
-        string? overrideTfm = null, // Allow overriding the TFM from PDB
-        List<string>? selectedAssemblies = null) // The assemblies that were selected for this TFM
+        string? overrideTfm = null,
+        List<string>? selectedAssemblies = null)
     {
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine("[yellow]Creating .complog file...[/]");
 
         var complogPath = Path.Combine(outputDirectory, $"{packageId}.{version}.complog");
         
-        // Load compiler arguments and metadata references
         var compilerArgsFile = Path.Combine(workingDirectory, "compiler-arguments.txt");
         var metadataRefsFile = Path.Combine(workingDirectory, "metadata-references.txt");
         
         if (!File.Exists(compilerArgsFile))
         {
             AnsiConsole.MarkupLine("[yellow]⚠[/] No compiler arguments found - cannot create complog");
-            return complogPath; // Return path but file won't exist
+            return complogPath;
         }
 
         var compilerArgs = await File.ReadAllLinesAsync(compilerArgsFile);
@@ -43,23 +42,18 @@ public class CompLogFileCreator
         {
             await using var complogStream = new FileStream(complogPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None);
             
-            // Now we can directly instantiate the internal CompilerLogBuilder
             using var builder = new CompilerLogBuilder(complogStream, diagnostics);
 
-            // Find the assembly with the best TFM
-            // Use selectedAssemblies if provided, otherwise search
             var assemblies = selectedAssemblies ?? new List<string>();
             
             if (assemblies.Count == 0)
             {
-                // Fallback: Use the assembly in references/ which is already selected and copied
                 var referencesDir = Path.Combine(workingDirectory, "references");
                 var extractedDir = Path.Combine(workingDirectory, "extracted");
                 
                 AnsiConsole.MarkupLine($"  [dim]Working directory: {workingDirectory}[/]");
                 AnsiConsole.MarkupLine($"  [dim]References dir: {referencesDir}, exists: {Directory.Exists(referencesDir)}[/]");
                 
-                // First try references directory (already selected best TFM)
                 if (Directory.Exists(referencesDir))
                 {
                     assemblies.AddRange(Directory.GetFiles(referencesDir, "*.dll", SearchOption.TopDirectoryOnly));
@@ -69,7 +63,6 @@ public class CompLogFileCreator
                     }
                 }
                 
-                // Fallback to extracted directory
                 if (assemblies.Count == 0)
                 {
                     AnsiConsole.MarkupLine($"  [yellow]Falling back to extracted directory[/]");
@@ -84,15 +77,12 @@ public class CompLogFileCreator
             if (assemblies.Count == 0)
             {
                 AnsiConsole.MarkupLine("[yellow]⚠[/] No assemblies found in package");
-                return complogPath; // Return path but file won't exist
+                return complogPath;
             }
 
-            // Get the first assembly (we already selected best TFM)
             var assemblyPath = assemblies[0];
             var isCSharp = !assemblyPath.EndsWith(".vb", StringComparison.OrdinalIgnoreCase);
 
-            // Extract debug configuration from the original assembly
-            // This tells us what /debug: flags were used in the original build
             AnsiConsole.MarkupLine($"  [cyan]Analyzing assembly:[/] {Path.GetRelativePath(workingDirectory, assemblyPath)}");
             var debugConfig = DebugConfigurationExtractor.ExtractDebugConfiguration(assemblyPath);
             AnsiConsole.MarkupLine($"  [cyan]Debug configuration:[/] {debugConfig.DebugType}");
@@ -102,23 +92,16 @@ public class CompLogFileCreator
                 AnsiConsole.MarkupLine($"    [dim]PDB Path: {debugConfig.PdbPath}[/]");
             }
 
-            // Determine compiler path
             var compilerPath = FindCompilerPath(isCSharp);
-            
-            // Parse the compiler arguments dictionary
             var argsDict = ParseCompilerArgumentsFile(compilerArgs);
-            
-            // Extract target framework - use override if provided, otherwise extract from args
             var targetFramework = overrideTfm ?? ExtractTargetFramework(argsDict);
             
-            // Log which TFM we're using
             if (overrideTfm != null && overrideTfm != ExtractTargetFramework(argsDict))
             {
                 AnsiConsole.MarkupLine($"  [cyan]→[/] Overriding TFM: [yellow]{ExtractTargetFramework(argsDict)}[/] → [green]{overrideTfm}[/]");
                 AnsiConsole.MarkupLine($"     [dim](Using selected package TFM instead of PDB TFM)[/]");
             }
             
-            // Load metadata references
             var metadataReferences = new List<MetadataReference>();
             if (File.Exists(metadataRefsFile))
             {
@@ -135,14 +118,12 @@ public class CompLogFileCreator
                     .ToList();
             }
 
-            // Acquire all reference assemblies
             Dictionary<string, string> acquiredReferences = new();
             if (metadataReferences.Count > 0 && !string.IsNullOrEmpty(targetFramework))
             {
                 var acquisitionService = new ReferenceAssemblyAcquisitionService(workingDirectory);
                 acquiredReferences = await acquisitionService.AcquireAllReferencesAsync(metadataReferences, targetFramework);
                 
-                // If we didn't acquire any references, compilation will fail
                 if (acquiredReferences.Count == 0)
                 {
                     AnsiConsole.MarkupLine($"  [yellow]⚠[/] No reference assemblies acquired - complog may not be complete");
@@ -157,12 +138,8 @@ public class CompLogFileCreator
                 }
             }
 
-            // Build compiler arguments string array, including reference paths
             var args = BuildCompilerArguments(argsDict, assemblyPath, workingDirectory, acquiredReferences, debugConfig);
 
-            // Prepare paths for CommandLineParser
-            // Source files are now saved directly in sources/ without extra nesting
-            // so the project directory should be sources/
             var projectDir = Path.Combine(workingDirectory, "sources");
             var projectFilePath = Path.Combine(projectDir, $"{packageId}.csproj");
             
@@ -174,15 +151,13 @@ public class CompLogFileCreator
                 isCSharp: isCSharp,
                 arguments: args);
 
-            // Parse the command line arguments
-            // Use projectDir as base so source file paths resolve correctly
             CommandLineArguments commandLineArguments;
             
             if (isCSharp)
             {
                 commandLineArguments = CSharpCommandLineParser.Default.Parse(
                     args,
-                    projectDir, // Base directory where source files can be resolved
+                    projectDir,
                     sdkDirectory: null,
                     additionalReferenceDirectories: null);
             }
@@ -190,16 +165,14 @@ public class CompLogFileCreator
             {
                 commandLineArguments = VisualBasicCommandLineParser.Default.Parse(
                     args,
-                    projectDir, // Base directory where source files can be resolved
+                    projectDir,
                     sdkDirectory: null,
                     additionalReferenceDirectories: null);
             }
 
-            // Add the compilation to the complog
             builder.AddFromDisk(compilerCall, commandLineArguments);
             AnsiConsole.MarkupLine($"  [green]✓[/] Added compilation to complog");
 
-            // Close the builder (writes metadata and finalizes the archive)
             builder.Close();
         }
         catch (Exception ex)
@@ -209,7 +182,6 @@ public class CompLogFileCreator
             diagnostics.Add($"Error creating complog: {ex.Message}");
         }
 
-        // Display diagnostics if any
         if (diagnostics.Count > 0)
         {
             AnsiConsole.MarkupLine("");
@@ -242,22 +214,19 @@ public class CompLogFileCreator
         
         for (int i = 0; i < lines.Length; i++)
         {
-            // Check if this line is a command-line argument (starts with /)
             if (lines[i].StartsWith('/'))
             {
                 extraArgs.Add(lines[i]);
                 continue;
             }
             
-            // Otherwise treat as key-value pair
             if (i < lines.Length - 1)
             {
                 dict[lines[i]] = lines[i + 1];
-                i++; // Skip next line as it's the value
+                i++;
             }
         }
         
-        // Store extra args in a special key if present
         if (extraArgs.Count > 0)
         {
             dict["__extra_args__"] = string.Join(" ", extraArgs);
@@ -268,7 +237,6 @@ public class CompLogFileCreator
 
     private static string? ExtractTargetFramework(Dictionary<string, string> args)
     {
-        // Try to extract from defines
         if (args.TryGetValue("define", out var defines))
         {
             var defineList = defines.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries);
@@ -276,7 +244,6 @@ public class CompLogFileCreator
             {
                 if (define.StartsWith("NET", StringComparison.Ordinal) && define.Contains("_"))
                 {
-                    // Convert NET8_0 to net8.0
                     return define.Replace("_", ".").ToLowerInvariant();
                 }
             }
@@ -294,27 +261,22 @@ public class CompLogFileCreator
     {
         var args = new List<string>();
         
-        // Add sources from the sources directory
-        // Source files are now saved directly in sources/ with their relative structure
         var sourcesDir = Path.Combine(workingDirectory, "sources");
         
         if (Directory.Exists(sourcesDir))
         {
             foreach (var sourceFile in Directory.GetFiles(sourcesDir, "*.cs", SearchOption.AllDirectories))
             {
-                // Get path relative to sources directory to get just: JsonConvert.cs or Bson/BsonReader.cs
                 var relativePath = Path.GetRelativePath(sourcesDir, sourceFile);
                 args.Add(relativePath);
             }
         }
 
-        // Add embedded resources from the resources directory
         var resourcesDir = Path.Combine(workingDirectory, "resources");
         var resourceMappingsFile = Path.Combine(workingDirectory, "resource-mappings.txt");
         
         if (Directory.Exists(resourcesDir) && File.Exists(resourceMappingsFile))
         {
-            // Read the resource mappings to get original resource names
             var mappings = File.ReadAllLines(resourceMappingsFile);
             
             foreach (var mapping in mappings)
@@ -328,24 +290,19 @@ public class CompLogFileCreator
                     
                     if (File.Exists(resourceFile))
                     {
-                        // The resource argument format is: /resource:filepath,logicalname
-                        // We use absolute path since resources are in a different directory than sources
                         args.Add($"/resource:{resourceFile},{originalName}");
                     }
                 }
             }
         }
 
-        // Add compiler options from the parsed arguments
         foreach (var kvp in argsDict)
         {
-            // Skip metadata fields
             if (kvp.Key == "source-file-count" || kvp.Key == "version" || 
                 kvp.Key == "compiler-version" || kvp.Key == "language" ||
                 kvp.Key == "__extra_args__") 
                 continue;
             
-            // Map output-kind to /target
             if (kvp.Key == "output-kind")
             {
                 var target = kvp.Value switch
@@ -361,7 +318,6 @@ public class CompLogFileCreator
                 continue;
             }
             
-            // Map optimization to the correct format (/optimize+ or /optimize-)
             if (kvp.Key == "optimization")
             {
                 var optimizationValue = kvp.Value.Equals("release", StringComparison.OrdinalIgnoreCase) ||
@@ -371,7 +327,6 @@ public class CompLogFileCreator
                 continue;
             }
             
-            // Map known options to their correct argument names
             var argName = kvp.Key switch
             {
                 "runtime-version" => "runtimemetadataversion",
@@ -381,20 +336,14 @@ public class CompLogFileCreator
             args.Add($"/{argName}:{kvp.Value}");
         }
 
-        // Add extra command-line arguments (like /debug:embedded, /deterministic+)
         if (argsDict.TryGetValue("__extra_args__", out var extraArgs))
         {
             args.AddRange(extraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries));
         }
         
-        // Add debug configuration flags extracted from the original assembly
-        // This is critical for byte-for-byte reproduction!
-        // Provide a writable PDB path that will be transformed by pathmap
         string? pdbOutputPath = null;
         if (debugConfig.DebugType == DebugType.PortableExternal && !string.IsNullOrEmpty(debugConfig.PdbPath))
         {
-            // Use a relative path that will exist when complog is exported/replayed
-            // The pathmap will transform this to appear as the original path
             var pdbFileName = Path.GetFileName(debugConfig.PdbPath);
             pdbOutputPath = $"output/{pdbFileName}";
         }
@@ -402,14 +351,11 @@ public class CompLogFileCreator
         var debugFlags = debugConfig.ToCompilerFlags(pdbOutputPath);
         args.AddRange(debugFlags);
 
-        // Add reference assemblies
         foreach (var reference in acquiredReferences.Values)
         {
             args.Add($"/reference:{reference}");
         }
 
-        // Determine output path - we need this for pathmap calculation
-        // The output will be written to the same location as the source assembly
         var outputPath = assemblyPath;
         args.Add($"/out:{outputPath}");
         
@@ -445,14 +391,12 @@ public class CompLogFileCreator
                 if (pdbPathParts.Length >= 3 && pdbPathParts[0] == "_" && pdbPathParts[1] == "src")
                 {
                     var packageName = pdbPathParts[2];
-                    // Use relative path "src/" for the source directory
                     args.Add($"/pathmap:src/=/_/src/{packageName}/");
                 }
             }
         }
         else
         {
-            // Fallback: Map src/ to / for cleaner paths
             args.Add($"/pathmap:src/=/");
         }
 
@@ -461,7 +405,6 @@ public class CompLogFileCreator
 
     private static string? FindCompilerPath(bool isCSharp)
     {
-        // Try to find the Roslyn compiler in the .NET SDK
         var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT") 
             ?? "/usr/local/share/dotnet";
         
