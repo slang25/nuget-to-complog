@@ -36,6 +36,9 @@ public class CompLogStructureCreator
         // Copy sources
         CopySources(workingDirectory, outputPath);
 
+        // Copy resources
+        CopyResources(workingDirectory, outputPath);
+
         // Copy references
         CopyReferences(workingDirectory, outputPath, selectedAssemblies);
 
@@ -62,6 +65,18 @@ public class CompLogStructureCreator
             CopyDirectory(sourcesDir, targetSourcesDir);
             var fileCount = _fileSystem.GetFiles(targetSourcesDir, "*.*", SearchOption.AllDirectories).Length;
             _console.MarkupLine($"  [green]✓[/] Copied {fileCount} source files");
+        }
+    }
+
+    private void CopyResources(string workingDirectory, string outputPath)
+    {
+        var resourcesDir = Path.Combine(workingDirectory, "resources");
+        if (_fileSystem.DirectoryExists(resourcesDir))
+        {
+            var targetResourcesDir = Path.Combine(outputPath, "resources");
+            CopyDirectory(resourcesDir, targetResourcesDir);
+            var fileCount = _fileSystem.GetFiles(targetResourcesDir, "*.*", SearchOption.AllDirectories).Length;
+            _console.MarkupLine($"  [green]✓[/] Copied {fileCount} embedded resource file(s)");
         }
     }
 
@@ -142,6 +157,13 @@ public class CompLogStructureCreator
             _fileSystem.CopyFile(metadataRefsFile, Path.Combine(outputPath, "metadata-references.txt"), true);
             _console.MarkupLine("  [green]✓[/] Copied metadata references");
         }
+
+        var resourceMappingsFile = Path.Combine(workingDirectory, "resource-mappings.txt");
+        if (_fileSystem.FileExists(resourceMappingsFile))
+        {
+            _fileSystem.CopyFile(resourceMappingsFile, Path.Combine(outputPath, "resource-mappings.txt"), true);
+            _console.MarkupLine("  [green]✓[/] Copied resource mappings");
+        }
     }
 
     private void CopySymbols(string workingDirectory, string outputPath)
@@ -190,6 +212,7 @@ public class CompLogStructureCreator
             $"[cyan]Output directory:[/] {outputPath}\n\n" +
             $"[yellow]Contents:[/]\n" +
             $"  • sources/ - Extracted source files\n" +
+            $"  • resources/ - Embedded resource files\n" +
             $"  • references/ - Assembly references\n" +
             $"  • symbols/ - PDB symbol files (if available)\n" +
             $"  • compiler-arguments.txt - Compiler command-line arguments\n" +

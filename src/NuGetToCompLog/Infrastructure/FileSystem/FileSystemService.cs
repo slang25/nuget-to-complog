@@ -58,6 +58,11 @@ public class FileSystemService : IFileSystemService
         await File.WriteAllLinesAsync(path, lines, cancellationToken);
     }
 
+    public async Task WriteAllBytesAsync(string path, byte[] bytes, CancellationToken cancellationToken = default)
+    {
+        await File.WriteAllBytesAsync(path, bytes, cancellationToken);
+    }
+
     public async Task ExtractZipAsync(string zipPath, string destinationPath, bool overwrite)
     {
         await Task.Run(() =>

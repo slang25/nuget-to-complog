@@ -19,6 +19,7 @@ public class ProcessPackageCommandHandler
     private readonly IPdbReader _pdbReader;
     private readonly IReferenceResolver _referenceResolver;
     private readonly CompLogStructureCreator _structureCreator;
+    private readonly ISourceFileDownloader _sourceDownloader;
     private readonly IFileSystemService _fileSystem;
     private readonly IConsoleWriter _console;
 
@@ -30,6 +31,7 @@ public class ProcessPackageCommandHandler
         IPdbReader pdbReader,
         IReferenceResolver referenceResolver,
         CompLogStructureCreator structureCreator,
+        ISourceFileDownloader sourceDownloader,
         IFileSystemService fileSystem,
         IConsoleWriter console)
     {
@@ -40,6 +42,7 @@ public class ProcessPackageCommandHandler
         _pdbReader = pdbReader;
         _referenceResolver = referenceResolver;
         _structureCreator = structureCreator;
+        _sourceDownloader = sourceDownloader;
         _fileSystem = fileSystem;
         _console = console;
     }
@@ -120,7 +123,15 @@ public class ProcessPackageCommandHandler
                 version,
                 workingDirectory,
                 Directory.GetCurrentDirectory(),
-                selectedTfm);
+                selectedTfm,
+                selectedAssemblies); // Pass the selected assemblies so we analyze the right one
+
+            // Verify the complog file was actually created
+            if (!File.Exists(complogFilePath))
+            {
+                _console.MarkupLine("[red]✗[/] CompLog file was not created - check that the package has embedded PDBs with compiler arguments");
+                return null;
+            }
 
             return complogFilePath;
         }
@@ -257,24 +268,66 @@ public class ProcessPackageCommandHandler
             _console.MarkupLine($"  [green]✓[/] Saved {metadata.MetadataReferences.Count} metadata references");
         }
 
+        // Save embedded resources
+        if (metadata.EmbeddedResources.Count > 0)
+        {
+            var resourcesDir = Path.Combine(workingDirectory, "resources");
+            _fileSystem.CreateDirectory(resourcesDir);
+            
+            // Also save a mapping file to preserve original resource names
+            var resourceMappings = new List<string>();
+            
+            foreach (var resource in metadata.EmbeddedResources)
+            {
+                // Use the resource name as filename, but sanitize it
+                var fileName = resource.Name.Replace("/", "_").Replace("\\", "_");
+                var filePath = Path.Combine(resourcesDir, fileName);
+                await _fileSystem.WriteAllBytesAsync(filePath, resource.Content);
+                
+                // Save the mapping: sanitizedName -> originalName
+                resourceMappings.Add($"{fileName}|{resource.Name}");
+            }
+            
+            // Write the resource mapping file
+            var mappingPath = Path.Combine(workingDirectory, "resource-mappings.txt");
+            await _fileSystem.WriteAllLinesAsync(mappingPath, resourceMappings);
+            
+            _console.MarkupLine($"  [green]✓[/] Saved {metadata.EmbeddedResources.Count} embedded resource(s)");
+        }
+
         // Save source files
         if (metadata.SourceFiles.Count > 0)
         {
             var sourcesDir = Path.Combine(workingDirectory, "sources");
             _fileSystem.CreateDirectory(sourcesDir);
             
-            var savedCount = 0;
+            // Save embedded sources
+            var embeddedCount = 0;
             foreach (var sourceFile in metadata.SourceFiles.Where(sf => sf.HasContent))
             {
                 var fileName = Path.GetFileName(sourceFile.Path);
                 var filePath = Path.Combine(sourcesDir, fileName);
                 await _fileSystem.WriteAllTextAsync(filePath, sourceFile.Content!);
-                savedCount++;
+                embeddedCount++;
             }
 
-            if (savedCount > 0)
+            if (embeddedCount > 0)
             {
-                _console.MarkupLine($"  [green]✓[/] Saved {savedCount} embedded source files");
+                _console.MarkupLine($"  [green]✓[/] Saved {embeddedCount} embedded source files");
+            }
+
+            // Download non-embedded sources from Source Link
+            if (!string.IsNullOrEmpty(metadata.SourceLinkJson))
+            {
+                var downloadedCount = await _sourceDownloader.DownloadSourceFilesAsync(
+                    metadata.SourceFiles,
+                    metadata.SourceLinkJson,
+                    sourcesDir);
+
+                if (downloadedCount > 0)
+                {
+                    _console.MarkupLine($"  [green]✓[/] Downloaded {downloadedCount} source files from Source Link");
+                }
             }
         }
     }

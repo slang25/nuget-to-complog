@@ -9,7 +9,8 @@ public record PdbMetadata(
     List<string> CompilerArguments,
     List<MetadataReference> MetadataReferences,
     List<SourceFileInfo> SourceFiles,
-    string? SourceLinkJson)
+    string? SourceLinkJson,
+    List<EmbeddedResourceInfo> EmbeddedResources)
 {
     public PdbMetadata() : this(
         null,
@@ -17,7 +18,8 @@ public record PdbMetadata(
         new List<string>(),
         new List<MetadataReference>(),
         new List<SourceFileInfo>(),
-        null)
+        null,
+        new List<EmbeddedResourceInfo>())
     {
     }
 }

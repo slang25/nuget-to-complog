@@ -62,10 +62,17 @@ public class NuGetClientService : INuGetClient
         var snupkgUrls = new[]
         {
             $"https://api.nuget.org/v3-flatcontainer/{package.Id.ToLowerInvariant()}/{package.Version.ToLowerInvariant()}/{package.Id.ToLowerInvariant()}.{package.Version.ToLowerInvariant()}.snupkg",
+            // v2 API endpoint - this is where many packages publish their symbols
+            $"https://www.nuget.org/api/v2/symbolpackage/{package.Id}/{package.Version}",
             $"https://globalcdn.nuget.org/packages/{package.Id.ToLowerInvariant()}.{package.Version.ToLowerInvariant()}.snupkg",
         };
 
-        using var httpClient = new HttpClient();
+        using var handler = new HttpClientHandler
+        {
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 10
+        };
+        using var httpClient = new HttpClient(handler);
         httpClient.Timeout = TimeSpan.FromSeconds(30);
 
         foreach (var snupkgUrl in snupkgUrls)

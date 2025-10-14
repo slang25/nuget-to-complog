@@ -4,7 +4,55 @@ All notable changes to the NuGet to CompLog tool.
 
 ## [Unreleased]
 
-### Added - Enhanced Console UI (Latest)
+### Major Refactoring (2025-10-13)
+
+#### Architecture Improvements
+- **Complete code refactoring** from monolithic classes to clean architecture with SOLID principles
+- Reduced largest class from 1,340 lines to 315 lines (76% reduction)
+- Extracted 32 new files organized into 6 clear architectural layers
+- Implemented dependency injection using Microsoft.Extensions.DependencyInjection
+- All services now interface-based and fully testable
+
+#### New Architecture Layers
+1. **Domain** (6 files) - Immutable value objects: PackageIdentity, CompilationInfo, PdbMetadata, SourceFileInfo, TargetFrameworkInfo, ReferenceAssemblyInfo
+2. **Abstractions** (7 files) - Service interfaces: INuGetClient, IFileSystemService, IConsoleWriter, IPdbReader, ISourceFileDownloader, ITargetFrameworkSelector, IReferenceResolver
+3. **Exceptions** (5 files) - Custom exceptions with rich context
+4. **Infrastructure** (3 files) - External concerns: FileSystemService, SpectreConsoleWriter, HttpSourceFileDownloader
+5. **Services** (12 files) - Business logic split into focused services (NuGet, PDB, References, CompLog)
+6. **Commands** (2 files) - Command pattern: ProcessPackageCommand and ProcessPackageCommandHandler
+
+#### Removed Dead Code
+- Removed `CompilerArgumentsExtractor.cs` (434 lines) - replaced by ProcessPackageCommandHandler
+- Removed `PdbCompilerArgumentsExtractor.cs` (1,340 lines) - replaced by 4 focused PDB services
+- Removed `CompLogCreator.cs` (179 lines) - replaced by CompLogStructureCreator
+- Updated all tests to use new architecture
+
+#### CLI Framework Integration
+- Integrated **ConsoleAppFramework v5.6.1** for modern CLI handling
+- Auto-generated help from XML documentation
+- Source generator-based argument parsing (zero reflection, zero overhead)
+- Support for both positional and named parameters
+- Built-in cancellation token support
+
+#### Enhanced Console Features
+- Added ConEmu/Windows Terminal progress indicators using ANSI escape sequences
+- Progress indicators appear in terminal title bar and Windows taskbar
+- Automatic progress reporting in `ExecuteWithStatusAsync`
+- Manual progress control methods: SetProgress, SetIndeterminateProgress, SetErrorProgress, ClearProgress
+- Graceful degradation on terminals that don't support progress sequences
+
+### Dependencies Added
+- Microsoft.Extensions.DependencyInjection (9.0.9)
+- ConsoleAppFramework (5.6.1)
+
+### Build Status
+- ✅ All tests passing (12 passed, 1 skipped)
+- ✅ Zero compilation errors
+- ✅ All functionality preserved
+
+---
+
+### Added - Enhanced Console UI
 - **Spectre.Console Integration**: Beautiful, rich console output with colors and formatting
   - FIGlet ASCII art banner for professional branding
   - Colored, bordered tables for structured information

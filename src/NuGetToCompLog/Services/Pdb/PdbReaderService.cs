@@ -69,13 +69,17 @@ public class PdbReaderService : IPdbReader
         // Extract Source Link
         var sourceLinkJson = ExtractSourceLink(metadataReader);
 
+        // Extract embedded resources from assembly
+        var embeddedResources = ExtractEmbeddedResources(assemblyPath);
+
         return new PdbMetadata(
             pdbPath,
             isEmbedded,
             compilationInfo.CompilerArguments,
             compilationInfo.MetadataReferences,
             sourceFiles,
-            sourceLinkJson);
+            sourceLinkJson,
+            embeddedResources);
     }
 
     private MetadataReader GetEmbeddedPdbReader(string assemblyPath)
@@ -174,5 +178,40 @@ public class PdbReaderService : IPdbReader
         {
             return null;
         }
+    }
+
+    private List<EmbeddedResourceInfo> ExtractEmbeddedResources(string assemblyPath)
+    {
+        var resources = new List<EmbeddedResourceInfo>();
+
+        try
+        {
+            // Load assembly to extract manifest resources
+            var assembly = System.Reflection.Assembly.LoadFrom(assemblyPath);
+            var resourceNames = assembly.GetManifestResourceNames();
+
+            foreach (var resourceName in resourceNames)
+            {
+                using var stream = assembly.GetManifestResourceStream(resourceName);
+                if (stream != null)
+                {
+                    using var memoryStream = new MemoryStream();
+                    stream.CopyTo(memoryStream);
+                    var content = memoryStream.ToArray();
+                    
+                    resources.Add(new EmbeddedResourceInfo(
+                        resourceName,
+                        content,
+                        content.Length));
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // If we can't load the assembly or extract resources, just return empty list
+            // This can happen with invalid assemblies or platform-specific assemblies
+        }
+
+        return resources;
     }
 }

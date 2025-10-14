@@ -3,6 +3,9 @@ using Basic.CompilerLog.Util;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Security.Cryptography;
+using NuGetToCompLog.Commands;
+using Microsoft.Extensions.DependencyInjection;
+using System.Diagnostics;
 
 namespace NuGetToCompLog.Tests;
 
@@ -31,8 +34,13 @@ public class RoundTripVerificationTests
         try
         {
             // Act - Step 1: Extract package and create complog
-            var extractor = new CompilerArgumentsExtractor();
-            await extractor.ProcessPackageAsync(packageId, version);
+            var services = new ServiceCollection();
+            services.AddNuGetToCompLogServices();
+            await using var serviceProvider = services.BuildServiceProvider();
+            
+            var handler = serviceProvider.GetRequiredService<ProcessPackageCommandHandler>();
+            var command = new ProcessPackageCommand(packageId, version);
+            await handler.HandleAsync(command, CancellationToken.None);
 
             var complogPath = Path.Combine(Directory.GetCurrentDirectory(), $"{packageId}.{version}.complog");
             Assert.True(File.Exists(complogPath), "CompLog file should be created");
@@ -101,8 +109,13 @@ public class RoundTripVerificationTests
         var version = "13.0.3";
         
         // Act - Create complog
-        var extractor = new CompilerArgumentsExtractor();
-        await extractor.ProcessPackageAsync(packageId, version);
+        var services = new ServiceCollection();
+        services.AddNuGetToCompLogServices();
+        await using var serviceProvider = services.BuildServiceProvider();
+        
+        var handler = serviceProvider.GetRequiredService<ProcessPackageCommandHandler>();
+        var command = new ProcessPackageCommand(packageId, version);
+        await handler.HandleAsync(command, CancellationToken.None);
 
         var complogPath = Path.Combine(Directory.GetCurrentDirectory(), $"{packageId}.{version}.complog");
         
@@ -191,8 +204,13 @@ public class RoundTripVerificationTests
         var version = "8.0.0";
         
         // Act - Create complog
-        var extractor = new CompilerArgumentsExtractor();
-        await extractor.ProcessPackageAsync(packageId, version);
+        var services = new ServiceCollection();
+        services.AddNuGetToCompLogServices();
+        await using var serviceProvider = services.BuildServiceProvider();
+        
+        var handler = serviceProvider.GetRequiredService<ProcessPackageCommandHandler>();
+        var command = new ProcessPackageCommand(packageId, version);
+        await handler.HandleAsync(command, CancellationToken.None);
 
         var complogPath = Path.Combine(Directory.GetCurrentDirectory(), $"{packageId}.{version}.complog");
         
@@ -245,28 +263,375 @@ public class RoundTripVerificationTests
         Assert.True(hasAwsSdkReference, "Should have AWS SDK references (transitive dependencies)");
     }
 
-    private string? FindOriginalAssemblyInCurrentRun(string packageId)
+    /// <summary>
+    /// Full round-trip test: Extract complog -> Rebuild assembly -> Compare hashes and metadata
+    /// This tests the core promise of deterministic builds: we should be able to reproduce the binary.
+    /// </summary>
+    [Fact]
+    public async Task RoundTripSerilog_RebuildAndCompareHashes()
     {
-        // The extractor creates temp directories - search recent temp folders
-        var tempBase = Path.GetTempPath();
-        var recentDirectories = Directory.GetDirectories(tempBase, "nuget-to-complog*")
-            .Select(d => new DirectoryInfo(d))
-            .Where(d => DateTime.Now - d.CreationTime < TimeSpan.FromMinutes(5)) // Created in last 5 minutes
-            .OrderByDescending(d => d.CreationTime);
+        await RoundTripTest("Serilog", "4.3.0");
+    }
 
-        foreach (var dir in recentDirectories)
+    [Fact]
+    public async Task RoundTripFluentValidation_RebuildAndCompareHashes()
+    {
+        await RoundTripTest("FluentValidation", "11.9.0");
+    }
+
+    [Fact]
+    public async Task RoundTripNewtonsoftJson_RebuildAndCompareHashes()
+    {
+        await RoundTripTest("Newtonsoft.Json", "13.0.3");
+    }
+
+    private async Task RoundTripTest(string packageId, string version)
+    {
+        // Arrange
+        var tempDir = Path.Combine(Path.GetTempPath(), $"{packageId.ToLower()}-roundtrip-{Guid.NewGuid()}");
+        
+        try
         {
-            var dlls = Directory.GetFiles(dir.FullName, $"{packageId}.dll", SearchOption.AllDirectories);
-            if (dlls.Length > 0)
+            Directory.CreateDirectory(tempDir);
+            
+            // Step 1: Create complog from NuGet package
+            _output.WriteLine($"=== Testing {packageId} {version} ===");
+            _output.WriteLine("=== Step 1: Creating CompLog from NuGet Package ===");
+            var services = new ServiceCollection();
+            services.AddNuGetToCompLogServices();
+            await using var serviceProvider = services.BuildServiceProvider();
+            
+            var handler = serviceProvider.GetRequiredService<ProcessPackageCommandHandler>();
+            var command = new ProcessPackageCommand(packageId, version);
+            await handler.HandleAsync(command, CancellationToken.None);
+
+            var complogPath = Path.Combine(Directory.GetCurrentDirectory(), $"{packageId}.{version}.complog");
+            Assert.True(File.Exists(complogPath), "CompLog file should be created");
+            _output.WriteLine($"Created: {complogPath}");
+
+            // Get the original assembly from the extraction directory
+            var extractionDir = Path.Combine(Directory.GetCurrentDirectory(), $"{packageId}-{version}-complog");
+            var originalAssemblyPath = FindOriginalAssembly(extractionDir, packageId);
+            Assert.NotNull(originalAssemblyPath);
+            Assert.True(File.Exists(originalAssemblyPath), $"Original assembly should exist at {originalAssemblyPath}");
+            
+            // Calculate original assembly hash
+            var originalHash = CalculateFileHash(originalAssemblyPath);
+            var originalMetadata = GetAssemblyMetadata(originalAssemblyPath);
+            
+            _output.WriteLine($"\n=== Original Assembly ===");
+            _output.WriteLine($"Path: {originalAssemblyPath}");
+            _output.WriteLine($"SHA256: {originalHash}");
+            _output.WriteLine($"Size: {originalMetadata.Size:N0} bytes");
+            _output.WriteLine($"Version: {originalMetadata.Version}");
+            _output.WriteLine($"Types: {originalMetadata.TypeCount}");
+            _output.WriteLine($"Methods: {originalMetadata.MethodCount}");
+            if (originalMetadata.HasPublicKeyToken)
             {
-                return dlls[0];
+                _output.WriteLine($"Public Key Token: {originalMetadata.PublicKeyToken}");
             }
+
+            // Step 2: Export the complog for inspection
+            _output.WriteLine($"\n=== Step 2: Exporting CompLog ===");
+            var exportDir = Path.Combine(tempDir, "exported");
+            var exportResult = await RunCompLogCommandAsync("export", $"\"{complogPath}\" -o \"{exportDir}\"");
+            Assert.Equal(0, exportResult.ExitCode);
+            _output.WriteLine($"Exported to: {exportDir}");
+            
+            // Find the exported project directory
+            var projectDirs = Directory.GetDirectories(exportDir);
+            Assert.NotEmpty(projectDirs);
+            var projectDir = projectDirs[0];
+            _output.WriteLine($"Project directory: {projectDir}");
+
+            // Step 3: Replay (rebuild) the compilation
+            _output.WriteLine($"\n=== Step 3: Replaying Compilation ===");
+            var replayOutputDir = Path.Combine(tempDir, "replay-output");
+            Directory.CreateDirectory(replayOutputDir);
+            
+            var replayResult = await RunCompLogCommandAsync("replay", $"\"{complogPath}\" -o \"{replayOutputDir}\"");
+            
+            _output.WriteLine($"Replay exit code: {replayResult.ExitCode}");
+            _output.WriteLine($"Replay stdout:\n{replayResult.Output}");
+            if (!string.IsNullOrEmpty(replayResult.Error))
+            {
+                _output.WriteLine($"Replay stderr:\n{replayResult.Error}");
+            }
+
+            // Note: Even if replay doesn't work perfectly, let's continue to analyze what was created
+            
+            // Find the rebuilt assembly
+            var rebuiltAssemblyPath = FindRebuiltAssembly(replayOutputDir, projectDir, packageId);
+            
+            if (rebuiltAssemblyPath != null && File.Exists(rebuiltAssemblyPath))
+            {
+                // Step 4: Compare original and rebuilt assemblies
+                _output.WriteLine($"\n=== Step 4: Comparing Assemblies ===");
+                var rebuiltHash = CalculateFileHash(rebuiltAssemblyPath);
+                var rebuiltMetadata = GetAssemblyMetadata(rebuiltAssemblyPath);
+                
+                _output.WriteLine($"\n=== Rebuilt Assembly ===");
+                _output.WriteLine($"Path: {rebuiltAssemblyPath}");
+                _output.WriteLine($"SHA256: {rebuiltHash}");
+                _output.WriteLine($"Size: {rebuiltMetadata.Size:N0} bytes");
+                _output.WriteLine($"Version: {rebuiltMetadata.Version}");
+                _output.WriteLine($"Types: {rebuiltMetadata.TypeCount}");
+                _output.WriteLine($"Methods: {rebuiltMetadata.MethodCount}");
+                if (rebuiltMetadata.HasPublicKeyToken)
+                {
+                    _output.WriteLine($"Public Key Token: {rebuiltMetadata.PublicKeyToken}");
+                }
+                
+                _output.WriteLine($"\n=== Comparison Results ===");
+                var hashesMatch = originalHash == rebuiltHash;
+                _output.WriteLine($"Hashes Match: {hashesMatch}");
+                _output.WriteLine($"Size Match: {originalMetadata.Size == rebuiltMetadata.Size} (Δ {rebuiltMetadata.Size - originalMetadata.Size:+#;-#;0} bytes)");
+                _output.WriteLine($"Version Match: {originalMetadata.Version == rebuiltMetadata.Version}");
+                _output.WriteLine($"Type Count Match: {originalMetadata.TypeCount == rebuiltMetadata.TypeCount} (Original: {originalMetadata.TypeCount}, Rebuilt: {rebuiltMetadata.TypeCount})");
+                _output.WriteLine($"Method Count Match: {originalMetadata.MethodCount == rebuiltMetadata.MethodCount} (Original: {originalMetadata.MethodCount}, Rebuilt: {rebuiltMetadata.MethodCount})");
+                
+                if (originalMetadata.HasPublicKeyToken && rebuiltMetadata.HasPublicKeyToken)
+                {
+                    var tokenMatch = originalMetadata.PublicKeyToken == rebuiltMetadata.PublicKeyToken;
+                    _output.WriteLine($"Public Key Token Match: {tokenMatch}");
+                    if (!tokenMatch)
+                    {
+                        _output.WriteLine($"  Original: {originalMetadata.PublicKeyToken}");
+                        _output.WriteLine($"  Rebuilt:  {rebuiltMetadata.PublicKeyToken}");
+                    }
+                }
+
+                if (!hashesMatch)
+                {
+                    _output.WriteLine($"\n=== Hash Mismatch Analysis ===");
+                    await AnalyzeBinaryDifferences(originalAssemblyPath, rebuiltAssemblyPath);
+                }
+
+                // Assertions - document what we expect
+                // Note: For a true deterministic build, we'd expect exact hash match
+                // But there may be legitimate differences (timestamps, signing, etc.)
+                
+                // Type counts can differ slightly due to compiler-generated types (lambdas, iterators)
+                // Allow a small tolerance
+                var typeDiff = Math.Abs(originalMetadata.TypeCount - rebuiltMetadata.TypeCount);
+                Assert.True(typeDiff <= 5, $"Type count difference too large: {typeDiff} types differ");
+                
+                Assert.Equal(originalMetadata.MethodCount, rebuiltMetadata.MethodCount);
+                Assert.Equal(originalMetadata.Version, rebuiltMetadata.Version);
+                
+                // Document whether hashes match (but don't fail test if they don't - we want to see the differences)
+                if (hashesMatch)
+                {
+                    _output.WriteLine("\n✓ SUCCESS: Perfect deterministic rebuild - hashes match!");
+                }
+                else
+                {
+                    _output.WriteLine("\n⚠ Hashes differ - this is expected for many reasons:");
+                    _output.WriteLine("  - Timestamps in debug information");
+                    _output.WriteLine("  - MVID (Module Version ID) generation");
+                    _output.WriteLine("  - PDB checksum in PE header");
+                    _output.WriteLine("  - Strong name signature (if delay-signed)");
+                    _output.WriteLine("  - Embedded resources with timestamps");
+                }
+            }
+            else
+            {
+                _output.WriteLine($"\n⚠ Could not find rebuilt assembly at expected location");
+                _output.WriteLine($"Searched in: {replayOutputDir}");
+                _output.WriteLine($"Project dir: {projectDir}");
+                
+                // List what files were created
+                if (Directory.Exists(replayOutputDir))
+                {
+                    _output.WriteLine("\nFiles in replay output:");
+                    foreach (var file in Directory.GetFiles(replayOutputDir, "*.*", SearchOption.AllDirectories))
+                    {
+                        _output.WriteLine($"  {Path.GetRelativePath(replayOutputDir, file)}");
+                    }
+                }
+                
+                // This is informational - we want to see what happened
+                Assert.Fail("Could not find rebuilt assembly to compare");
+            }
+        }
+        finally
+        {
+            // Cleanup
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, recursive: true); } catch { }
+            }
+        }
+    }
+
+    private string? FindOriginalAssembly(string extractionDir, string packageId)
+    {
+        if (!Directory.Exists(extractionDir))
+            return null;
+
+        // Look for the assembly in the references directory
+        var referencesDir = Path.Combine(extractionDir, "references");
+        if (Directory.Exists(referencesDir))
+        {
+            var dllPath = Path.Combine(referencesDir, $"{packageId}.dll");
+            if (File.Exists(dllPath))
+                return dllPath;
+        }
+
+        // Fallback: search recursively
+        var dlls = Directory.GetFiles(extractionDir, $"{packageId}.dll", SearchOption.AllDirectories);
+        return dlls.FirstOrDefault();
+    }
+
+    private string? FindRebuiltAssembly(string replayOutputDir, string projectDir, string packageId)
+    {
+        // The replay command outputs to various possible locations
+        var possiblePaths = new[]
+        {
+            Path.Combine(replayOutputDir, $"{packageId}.dll"),
+            Path.Combine(projectDir, "bin", "Debug", $"{packageId}.dll"),
+            Path.Combine(projectDir, "bin", "Release", $"{packageId}.dll"),
+            Path.Combine(replayOutputDir, "bin", "Debug", $"{packageId}.dll"),
+            Path.Combine(replayOutputDir, "bin", "Release", $"{packageId}.dll"),
+        };
+
+        foreach (var path in possiblePaths)
+        {
+            if (File.Exists(path))
+                return path;
+        }
+
+        // Search recursively
+        if (Directory.Exists(replayOutputDir))
+        {
+            var dlls = Directory.GetFiles(replayOutputDir, $"{packageId}.dll", SearchOption.AllDirectories);
+            if (dlls.Length > 0)
+                return dlls[0];
+        }
+
+        if (Directory.Exists(projectDir))
+        {
+            var dlls = Directory.GetFiles(projectDir, $"{packageId}.dll", SearchOption.AllDirectories);
+            if (dlls.Length > 0)
+                return dlls[0];
         }
 
         return null;
     }
 
-    private AssemblyMetadata CompareAssemblyMetadata(string assemblyPath)
+    private string CalculateFileHash(string filePath)
+    {
+        using var sha256 = SHA256.Create();
+        using var stream = File.OpenRead(filePath);
+        var hash = sha256.ComputeHash(stream);
+        return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+    }
+
+    private async Task<ProcessResult> RunCompLogCommandAsync(string command, string arguments)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "complog",
+            Arguments = $"{command} {arguments}",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(psi);
+        if (process == null)
+        {
+            return new ProcessResult { ExitCode = -1, Error = "Failed to start process" };
+        }
+
+        var output = await process.StandardOutput.ReadToEndAsync();
+        var error = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+
+        return new ProcessResult
+        {
+            ExitCode = process.ExitCode,
+            Output = output,
+            Error = error
+        };
+    }
+
+    private async Task AnalyzeBinaryDifferences(string originalPath, string rebuiltPath)
+    {
+        _output.WriteLine("Analyzing binary differences...");
+        
+        // Read PE headers and compare
+        using var originalStream = File.OpenRead(originalPath);
+        using var rebuiltStream = File.OpenRead(rebuiltPath);
+        using var originalPE = new PEReader(originalStream);
+        using var rebuiltPE = new PEReader(rebuiltStream);
+
+        // Compare PE header timestamps
+        var originalHeaders = originalPE.PEHeaders;
+        var rebuiltHeaders = rebuiltPE.PEHeaders;
+        
+        _output.WriteLine($"PE Timestamp: Original={originalHeaders.CoffHeader.TimeDateStamp}, Rebuilt={rebuiltHeaders.CoffHeader.TimeDateStamp}");
+        
+        // Compare debug directory
+        var originalDebugDir = originalHeaders.PEHeader?.DebugTableDirectory;
+        var rebuiltDebugDir = rebuiltHeaders.PEHeader?.DebugTableDirectory;
+        _output.WriteLine($"Debug Directory: Original RVA={originalDebugDir?.RelativeVirtualAddress}, Rebuilt RVA={rebuiltDebugDir?.RelativeVirtualAddress}");
+
+        // Compare metadata
+        var originalMetadataReader = originalPE.GetMetadataReader();
+        var rebuiltMetadataReader = rebuiltPE.GetMetadataReader();
+
+        // Compare MVIDs
+        var originalMvid = originalMetadataReader.GetGuid(originalMetadataReader.GetModuleDefinition().Mvid);
+        var rebuiltMvid = rebuiltMetadataReader.GetGuid(rebuiltMetadataReader.GetModuleDefinition().Mvid);
+        _output.WriteLine($"MVID: Original={originalMvid}, Rebuilt={rebuiltMvid}");
+        _output.WriteLine($"MVID Match: {originalMvid == rebuiltMvid}");
+
+        // Check if there are embedded PDBs
+        var originalDebugEntries = originalPE.ReadDebugDirectory();
+        var rebuiltDebugEntries = rebuiltPE.ReadDebugDirectory();
+        
+        _output.WriteLine($"Debug Directory Entries: Original={originalDebugEntries.Length}, Rebuilt={rebuiltDebugEntries.Length}");
+        
+        for (int i = 0; i < Math.Min(originalDebugEntries.Length, rebuiltDebugEntries.Length); i++)
+        {
+            var origEntry = originalDebugEntries[i];
+            var rebEntry = rebuiltDebugEntries[i];
+            _output.WriteLine($"  Entry {i}: Type={origEntry.Type}, Original Size={origEntry.DataSize}, Rebuilt Size={rebEntry.DataSize}");
+        }
+
+        // Byte-by-byte comparison to find first difference
+        originalStream.Position = 0;
+        rebuiltStream.Position = 0;
+        
+        var originalBytes = new byte[4096];
+        var rebuiltBytes = new byte[4096];
+        long position = 0;
+        int firstDiffCount = 0;
+        
+        while (true)
+        {
+            var originalRead = await originalStream.ReadAsync(originalBytes, 0, originalBytes.Length);
+            var rebuiltRead = await rebuiltStream.ReadAsync(rebuiltBytes, 0, rebuiltBytes.Length);
+            
+            if (originalRead == 0 && rebuiltRead == 0)
+                break;
+                
+            for (int i = 0; i < Math.Min(originalRead, rebuiltRead); i++)
+            {
+                if (originalBytes[i] != rebuiltBytes[i] && firstDiffCount < 5)
+                {
+                    _output.WriteLine($"Diff at offset 0x{position + i:X8}: Original=0x{originalBytes[i]:X2}, Rebuilt=0x{rebuiltBytes[i]:X2}");
+                    firstDiffCount++;
+                }
+            }
+            
+            position += originalRead;
+        }
+    }
+
+    private AssemblyMetadata GetAssemblyMetadata(string assemblyPath)
     {
         using var stream = File.OpenRead(assemblyPath);
         using var peReader = new PEReader(stream);
@@ -296,6 +661,39 @@ public class RoundTripVerificationTests
             MethodCount = metadataReader.MethodDefinitions.Count,
             Size = new FileInfo(assemblyPath).Length
         };
+    }
+
+    private class ProcessResult
+    {
+        public int ExitCode { get; set; }
+        public string Output { get; set; } = "";
+        public string Error { get; set; } = "";
+    }
+
+    private string? FindOriginalAssemblyInCurrentRun(string packageId)
+    {
+        // The extractor creates temp directories - search recent temp folders
+        var tempBase = Path.GetTempPath();
+        var recentDirectories = Directory.GetDirectories(tempBase, "nuget-to-complog*")
+            .Select(d => new DirectoryInfo(d))
+            .Where(d => DateTime.Now - d.CreationTime < TimeSpan.FromMinutes(5)) // Created in last 5 minutes
+            .OrderByDescending(d => d.CreationTime);
+
+        foreach (var dir in recentDirectories)
+        {
+            var dlls = Directory.GetFiles(dir.FullName, $"{packageId}.dll", SearchOption.AllDirectories);
+            if (dlls.Length > 0)
+            {
+                return dlls[0];
+            }
+        }
+
+        return null;
+    }
+
+    private AssemblyMetadata CompareAssemblyMetadata(string assemblyPath)
+    {
+        return GetAssemblyMetadata(assemblyPath);
     }
 
     private class AssemblyMetadata

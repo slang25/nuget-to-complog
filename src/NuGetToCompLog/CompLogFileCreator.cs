@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Spectre.Console;
+using NuGetToCompLog.Services;
 
 namespace NuGetToCompLog;
 
@@ -17,7 +18,8 @@ public class CompLogFileCreator
         string version,
         string workingDirectory,
         string outputDirectory,
-        string? overrideTfm = null) // Allow overriding the TFM from PDB
+        string? overrideTfm = null, // Allow overriding the TFM from PDB
+        List<string>? selectedAssemblies = null) // The assemblies that were selected for this TFM
     {
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine("[yellow]Creating .complog file...[/]");
@@ -31,7 +33,7 @@ public class CompLogFileCreator
         if (!File.Exists(compilerArgsFile))
         {
             AnsiConsole.MarkupLine("[yellow]⚠[/] No compiler arguments found - cannot create complog");
-            return complogPath;
+            return complogPath; // Return path but file won't exist
         }
 
         var compilerArgs = await File.ReadAllLinesAsync(compilerArgsFile);
@@ -45,18 +47,60 @@ public class CompLogFileCreator
             using var builder = new CompilerLogBuilder(complogStream, diagnostics);
 
             // Find the assembly with the best TFM
-            var extractedDir = Path.Combine(workingDirectory, "extracted");
-            var assemblies = FindAssemblies(extractedDir);
+            // Use selectedAssemblies if provided, otherwise search
+            var assemblies = selectedAssemblies ?? new List<string>();
+            
+            if (assemblies.Count == 0)
+            {
+                // Fallback: Use the assembly in references/ which is already selected and copied
+                var referencesDir = Path.Combine(workingDirectory, "references");
+                var extractedDir = Path.Combine(workingDirectory, "extracted");
+                
+                AnsiConsole.MarkupLine($"  [dim]Working directory: {workingDirectory}[/]");
+                AnsiConsole.MarkupLine($"  [dim]References dir: {referencesDir}, exists: {Directory.Exists(referencesDir)}[/]");
+                
+                // First try references directory (already selected best TFM)
+                if (Directory.Exists(referencesDir))
+                {
+                    assemblies.AddRange(Directory.GetFiles(referencesDir, "*.dll", SearchOption.TopDirectoryOnly));
+                    if (assemblies.Count > 0)
+                    {
+                        AnsiConsole.MarkupLine($"  [green]Using assembly from references:[/] {Path.GetFileName(assemblies[0])}");
+                    }
+                }
+                
+                // Fallback to extracted directory
+                if (assemblies.Count == 0)
+                {
+                    AnsiConsole.MarkupLine($"  [yellow]Falling back to extracted directory[/]");
+                    assemblies = FindAssemblies(extractedDir);
+                }
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"  [green]Using pre-selected assemblies[/] ({assemblies.Count})");
+            }
             
             if (assemblies.Count == 0)
             {
                 AnsiConsole.MarkupLine("[yellow]⚠[/] No assemblies found in package");
-                return complogPath;
+                return complogPath; // Return path but file won't exist
             }
 
             // Get the first assembly (we already selected best TFM)
             var assemblyPath = assemblies[0];
             var isCSharp = !assemblyPath.EndsWith(".vb", StringComparison.OrdinalIgnoreCase);
+
+            // Extract debug configuration from the original assembly
+            // This tells us what /debug: flags were used in the original build
+            AnsiConsole.MarkupLine($"  [cyan]Analyzing assembly:[/] {Path.GetRelativePath(workingDirectory, assemblyPath)}");
+            var debugConfig = DebugConfigurationExtractor.ExtractDebugConfiguration(assemblyPath);
+            AnsiConsole.MarkupLine($"  [cyan]Debug configuration:[/] {debugConfig.DebugType}");
+            AnsiConsole.MarkupLine($"    [dim]{debugConfig}[/]");
+            if (!string.IsNullOrEmpty(debugConfig.PdbPath))
+            {
+                AnsiConsole.MarkupLine($"    [dim]PDB Path: {debugConfig.PdbPath}[/]");
+            }
 
             // Determine compiler path
             var compilerPath = FindCompilerPath(isCSharp);
@@ -114,7 +158,7 @@ public class CompLogFileCreator
             }
 
             // Build compiler arguments string array, including reference paths
-            var args = BuildCompilerArguments(argsDict, assemblyPath, workingDirectory, acquiredReferences);
+            var args = BuildCompilerArguments(argsDict, assemblyPath, workingDirectory, acquiredReferences, debugConfig);
 
             // Prepare paths for CommandLineParser
             // Source files are now saved directly in sources/ without extra nesting
@@ -245,7 +289,8 @@ public class CompLogFileCreator
         Dictionary<string, string> argsDict, 
         string assemblyPath, 
         string workingDirectory,
-        Dictionary<string, string> acquiredReferences)
+        Dictionary<string, string> acquiredReferences,
+        DebugConfiguration debugConfig)
     {
         var args = new List<string>();
         
@@ -260,6 +305,34 @@ public class CompLogFileCreator
                 // Get path relative to sources directory to get just: JsonConvert.cs or Bson/BsonReader.cs
                 var relativePath = Path.GetRelativePath(sourcesDir, sourceFile);
                 args.Add(relativePath);
+            }
+        }
+
+        // Add embedded resources from the resources directory
+        var resourcesDir = Path.Combine(workingDirectory, "resources");
+        var resourceMappingsFile = Path.Combine(workingDirectory, "resource-mappings.txt");
+        
+        if (Directory.Exists(resourcesDir) && File.Exists(resourceMappingsFile))
+        {
+            // Read the resource mappings to get original resource names
+            var mappings = File.ReadAllLines(resourceMappingsFile);
+            
+            foreach (var mapping in mappings)
+            {
+                var parts = mapping.Split('|');
+                if (parts.Length == 2)
+                {
+                    var sanitizedName = parts[0];
+                    var originalName = parts[1];
+                    var resourceFile = Path.Combine(resourcesDir, sanitizedName);
+                    
+                    if (File.Exists(resourceFile))
+                    {
+                        // The resource argument format is: /resource:filepath,logicalname
+                        // We use absolute path since resources are in a different directory than sources
+                        args.Add($"/resource:{resourceFile},{originalName}");
+                    }
+                }
             }
         }
 
@@ -313,6 +386,21 @@ public class CompLogFileCreator
         {
             args.AddRange(extraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries));
         }
+        
+        // Add debug configuration flags extracted from the original assembly
+        // This is critical for byte-for-byte reproduction!
+        // Provide a writable PDB path that will be transformed by pathmap
+        string? pdbOutputPath = null;
+        if (debugConfig.DebugType == DebugType.PortableExternal && !string.IsNullOrEmpty(debugConfig.PdbPath))
+        {
+            // Use a relative path that will exist when complog is exported/replayed
+            // The pathmap will transform this to appear as the original path
+            var pdbFileName = Path.GetFileName(debugConfig.PdbPath);
+            pdbOutputPath = $"output/{pdbFileName}";
+        }
+        
+        var debugFlags = debugConfig.ToCompilerFlags(pdbOutputPath);
+        args.AddRange(debugFlags);
 
         // Add reference assemblies
         foreach (var reference in acquiredReferences.Values)
@@ -320,12 +408,53 @@ public class CompLogFileCreator
             args.Add($"/reference:{reference}");
         }
 
-        // Add output
-        args.Add($"/out:{assemblyPath}");
+        // Determine output path - we need this for pathmap calculation
+        // The output will be written to the same location as the source assembly
+        var outputPath = assemblyPath;
+        args.Add($"/out:{outputPath}");
         
-        // Add pathmap to normalize paths in debug info  
-        // Map sources/ to / so paths appear cleanly as /JsonConvert.cs in debug info
-        args.Add($"/pathmap:{sourcesDir}{Path.DirectorySeparatorChar}=/");
+        // Add pathmap to make embedded paths match the original build
+        // CRITICAL: Use RELATIVE paths so they work when complog is exported/replayed!
+        //
+        // When complog export runs, it creates this structure:
+        // - ProjectName/
+        //   - src/           (source files)
+        //   - output/        (where DLL will be built)
+        //   - build.rsp      (compiler arguments)
+        //
+        // The pathmap needs to work from that exported directory structure.
+        // We want: src/ -> /_/src/PackageName/
+        //      and: output/ -> /_/src/PackageName/obj/Release/TFM/
+        
+        if (!string.IsNullOrEmpty(debugConfig.PdbPath))
+        {
+            // The PDB path gives us the original build structure
+            // Example: /_/src/Serilog/obj/Release/net9.0/Serilog.pdb
+            //
+            // Extract the package name and use RELATIVE paths in pathmap
+            var pdbDir = Path.GetDirectoryName(debugConfig.PdbPath);
+            
+            if (!string.IsNullOrEmpty(pdbDir))
+            {
+                // Use relative path "output/" for the output directory
+                // This will be resolved relative to where compilation runs (the exported project directory)
+                args.Add($"/pathmap:output/={pdbDir}/");
+                
+                // Extract package name from PDB path: /_/src/PackageName/obj/...
+                var pdbPathParts = debugConfig.PdbPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                if (pdbPathParts.Length >= 3 && pdbPathParts[0] == "_" && pdbPathParts[1] == "src")
+                {
+                    var packageName = pdbPathParts[2];
+                    // Use relative path "src/" for the source directory
+                    args.Add($"/pathmap:src/=/_/src/{packageName}/");
+                }
+            }
+        }
+        else
+        {
+            // Fallback: Map src/ to / for cleaner paths
+            args.Add($"/pathmap:src/=/");
+        }
 
         return args.ToArray();
     }

@@ -5,12 +5,16 @@ using NuGetToCompLog.Cli;
 using Spectre.Console;
 
 // Display fancy header
-AnsiConsole.Write(
-    new FigletText("NuGet to CompLog")
-        .LeftJustified()
-        .Color(Color.Cyan1));
-
-AnsiConsole.WriteLine();
+var banner = @"
+  [cyan1]███╗   ██╗ ██████╗ ██████╗  ██████╗██╗     [/]
+  [cyan1]████╗  ██║██╔════╝ ╚════██╗██╔════╝██║     [/]
+  [cyan1]██╔██╗ ██║██║  ███╗ █████╔╝██║     ██║     [/]
+  [cyan1]██║╚██╗██║██║   ██║██╔═══╝ ██║     ██║     [/]
+  [cyan1]██║ ╚████║╚██████╔╝███████╗╚██████╗███████╗[/]
+  [cyan1]╚═╝  ╚═══╝ ╚═════╝ ╚══════╝ ╚═════╝╚══════╝[/]
+  [dim]NuGet → CompLog Extractor[/]
+";
+AnsiConsole.MarkupLine(banner);
 
 // Set up dependency injection
 var services = new ServiceCollection();

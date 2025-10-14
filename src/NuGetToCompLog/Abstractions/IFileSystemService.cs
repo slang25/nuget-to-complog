@@ -56,6 +56,11 @@ public interface IFileSystemService
     Task WriteAllLinesAsync(string path, IEnumerable<string> lines, CancellationToken cancellationToken = default);
     
     /// <summary>
+    /// Writes all bytes to a file.
+    /// </summary>
+    Task WriteAllBytesAsync(string path, byte[] bytes, CancellationToken cancellationToken = default);
+    
+    /// <summary>
     /// Extracts a zip archive to a directory.
     /// </summary>
     Task ExtractZipAsync(string zipPath, string destinationPath, bool overwrite);
