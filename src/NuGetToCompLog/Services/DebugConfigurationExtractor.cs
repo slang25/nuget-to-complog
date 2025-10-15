@@ -32,6 +32,30 @@ public class DebugConfigurationExtractor
             pdbPath = codeViewData.Path;
         }
         
+        // Extract PDB checksum algorithm if present
+        string? pdbChecksumAlgorithm = null;
+        if (hasPdbChecksum)
+        {
+            var checksumEntry = debugEntries.First(e => e.Type == DebugDirectoryEntryType.PdbChecksum);
+            var checksumData = peReader.ReadPdbChecksumDebugDirectoryData(checksumEntry);
+            // The checksum data contains the algorithm name and hash
+            pdbChecksumAlgorithm = checksumData.AlgorithmName;
+            
+            // Default to SHA256 if we can't read it (most common)
+            if (string.IsNullOrEmpty(pdbChecksumAlgorithm))
+            {
+                pdbChecksumAlgorithm = "SHA256";
+            }
+        }
+        
+        // Check for HIGH_ENTROPY_VA flag in PE header
+        bool highEntropyVA = false;
+        if (peReader.PEHeaders.PEHeader != null)
+        {
+            const DllCharacteristics IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA = (DllCharacteristics)0x0020;
+            highEntropyVA = (peReader.PEHeaders.PEHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA) != 0;
+        }
+        
         // Determine debug type based on entries
         var debugType = DetermineDebugType(hasCodeView, hasEmbeddedPdb, hasPdbChecksum);
         
@@ -41,9 +65,11 @@ public class DebugConfigurationExtractor
             HasCodeView = hasCodeView,
             HasEmbeddedPdb = hasEmbeddedPdb,
             HasPdbChecksum = hasPdbChecksum,
+            PdbChecksumAlgorithm = pdbChecksumAlgorithm,
             HasReproducible = hasReproducible,
             PdbPath = pdbPath,
-            DebugEntryCount = debugEntries.Length
+            DebugEntryCount = debugEntries.Length,
+            HighEntropyVA = highEntropyVA
         };
     }
     
@@ -81,9 +107,11 @@ public class DebugConfiguration
     public bool HasCodeView { get; set; }
     public bool HasEmbeddedPdb { get; set; }
     public bool HasPdbChecksum { get; set; }
+    public string? PdbChecksumAlgorithm { get; set; }
     public bool HasReproducible { get; set; }
     public string? PdbPath { get; set; }
     public int DebugEntryCount { get; set; }
+    public bool HighEntropyVA { get; set; }
     
     /// <summary>
     /// Converts the debug configuration to compiler flags.
@@ -116,12 +144,21 @@ public class DebugConfiguration
                 {
                     flags.Add($"/pdb:{pdbOutputPath}");
                 }
+                
+                // Note: PDB checksums are automatically included when using /deterministic
+                // There is no separate /pdbchecksums+ compiler flag
                 break;
                 
             case DebugType.None:
                 // No debug info - don't add any debug flags
                 // The /deterministic+ flag should already be present
                 break;
+        }
+        
+        // Add high entropy VA flag if present in original
+        if (HighEntropyVA)
+        {
+            flags.Add("/highentropyva+");
         }
         
         return flags;
@@ -131,7 +168,7 @@ public class DebugConfiguration
     {
         return $"DebugType: {DebugType}, Entries: {DebugEntryCount}, " +
                $"CodeView: {HasCodeView}, EmbeddedPdb: {HasEmbeddedPdb}, " +
-               $"PdbChecksum: {HasPdbChecksum}, Reproducible: {HasReproducible}";
+               $"PdbChecksum: {HasPdbChecksum}, HighEntropyVA: {HighEntropyVA}, Reproducible: {HasReproducible}";
     }
 }
 
