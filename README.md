@@ -2,6 +2,8 @@
 
 A tool to extract compilation information from NuGet packages.
 
+![NuGet to CompLog in action](./usage.gif)
+
 ## What does it do?
 
 Imagine you find an interesting NuGet package on nuget.org and want to understand exactly how it was compiled. This tool takes a package name, downloads it, and extracts all the compiler settings, references, and source information that was baked into it. The result is a **CompLog** file—a portable, self-contained snapshot containing everything needed to rebuild that package from source.
