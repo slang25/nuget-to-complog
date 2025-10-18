@@ -137,6 +137,13 @@ public class DebugConfiguration
             case DebugType.PortableExternal:
                 // External portable PDB
                 flags.Add("/debug:portable");
+                
+                // CRITICAL: Explicitly prevent PDB embedding for external PDBs
+                // /debug:portable embeds by default in some contexts
+                // We need /embed- to explicitly prevent embedding and keep PDB external
+                // This is essential for deterministic reproduction - embedding changes binary size
+                flags.Add("/embed-");
+                
                 // Add the PDB path if provided
                 // The caller should provide a writable path (e.g., "output/Package.pdb")
                 // and use /pathmap to make it appear as the original path in metadata

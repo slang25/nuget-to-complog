@@ -41,6 +41,14 @@ public class CompilationOptionsExtractor
                 {
                     args.Add("/debug:embedded");
                 }
+                else
+                {
+                    // External portable PDB - add /debug:portable and /embed- flags
+                    // /embed- explicitly prevents embedding the PDB
+                    // This is critical for deterministic builds with external PDBs
+                    args.Add("/debug:portable");
+                    args.Add("/embed-");
+                }
 
                 if (hasReproducibleMarker)
                 {
