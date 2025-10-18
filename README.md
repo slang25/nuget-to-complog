@@ -1,190 +1,73 @@
 # NuGet to CompLog
 
-A .NET command-line tool that downloads NuGet packages and extracts compiler arguments from PDB files to prepare for creating CompLog files.
+A tool to extract compilation information from NuGet packages.
 
-## What is a CompLog?
+## What does it do?
 
-A CompLog (Compilation Log) is a portable format that contains everything needed to create a Roslyn workspace. It's essentially a serialized version of the `csc` command line arguments, but fully portable because it packages up:
-- Reference assemblies (framework assemblies)
-- NuGet package assemblies  
-- Source code
-- Compiler arguments and options
+Imagine you find an interesting NuGet package on nuget.org and want to understand exactly how it was compiled. This tool takes a package name, downloads it, and extracts all the compiler settings, references, and source information that was baked into it. The result is a **CompLog** file—a portable, self-contained snapshot containing everything needed to rebuild that package from source.
 
-Think of it as a deterministic snapshot of a compilation that can be moved between machines, similar to an MSBuild binlog but without the cruft and fully portable.
+**In plain English:** It's like taking a snapshot of a build. Everything that went into compiling that package gets captured in one `.complog` file that you can move around and use to replay the original compilation.
 
-## Current Features
-
-This tool currently implements the foundational steps:
-
-1. **Download NuGet packages** from nuget.org
-2. **Extract package contents** to examine assemblies
-3. **Attempt to download symbol packages** (.snupkg files)
-4. **Extract compiler arguments from PDBs** when available
-5. **Create CompLog files** - self-contained compilation snapshots
-6. **Round-trip verification** - rebuild assemblies and verify determinism
-7. **Display compilation metadata** including:
-   - Compiler command-line arguments
-   - Metadata references
-   - Source file listings
-   - Source Link configuration
-
-## Round-Trip Testing
-
-The tool has been validated with round-trip testing: extracting a CompLog from a NuGet package, rebuilding the assembly using the `complog` tool, and comparing the results. Testing on packages like Serilog, FluentValidation, and Newtonsoft.Json shows:
-
-- ✓ **100% method count match** - All methods are reproduced exactly
-- ✓ **Assembly version match** - Version numbers are preserved
-- ✓ **Functional equivalence** - Rebuilt assemblies are semantically identical
-- ⚠ **Binary differences** - Hashes differ due to MVID, timestamps, and signing (expected for deterministic builds)
-
-See [ROUND_TRIP_ANALYSIS.md](ROUND_TRIP_ANALYSIS.md) for detailed analysis of what matches and what differs, and why.
-
-## Usage
+## Example
 
 ```bash
-dotnet run -- <package-id> [version]
-
-# Examples:
+# Download Newtonsoft.Json and extract its compilation info
 dotnet run -- Newtonsoft.Json 13.0.3
-dotnet run -- System.Text.Json 8.0.0
-dotnet run -- Microsoft.Extensions.Logging
+
+# Creates: Newtonsoft.Json.13.0.3.complog
+# This file now contains all compiler settings, dependencies, and sources
 ```
 
-If no version is specified, the latest stable version is downloaded.
+## Why would I use this?
 
-## How It Works
+- **Understand how packages are built** - See exact compiler flags, optimizations, and settings
+- **Verify reproducibility** - Confirm you can rebuild a package identically
+- **Analyze dependencies** - Inspect what each package references
+- **Archive build information** - Keep a permanent snapshot of how a package was compiled
+- **Security auditing** - Examine source and compilation details of dependencies
 
-### 1. Package Download
-Uses the NuGet.Protocol library to:
-- Connect to nuget.org's V3 API
-- Download the specified package (.nupkg)
-- Attempt to download symbols package (.snupkg)
-
-### 2. PDB Discovery
-Searches for PDB files in three locations:
-- **Embedded PDBs**: Modern packages often embed PDBs directly in assemblies
-- **Symbols packages**: Separate .snupkg files containing PDB files
-- **Package contents**: Some packages include PDBs in the main .nupkg
-
-### 3. Compiler Argument Extraction
-When a PDB is found (portable PDB format), extracts:
-- **Compilation Options** (compiler command-line arguments)
-- **Metadata References** (assemblies referenced during compilation)
-- **Source Files** (file paths from the original build)
-- **Source Link** (mapping to source control URLs)
-
-This information is stored in custom debug information entries in the PDB:
-- `B5FEEC05-8CD0-4A83-96DA-466284BB4BD8` - Compilation options
-- `7E4D4708-096E-4C5C-AEDA-CB10BA6A740D` - Metadata references
-- `CC110556-A091-4D38-9FEC-25AB9A351A6A` - Source Link
-- `0E8A571B-6926-466E-B4AD-8AB04611F5FE` - Embedded source
-
-## Limitations & Requirements
-
-### Package Requirements
-For this tool to extract complete information, packages must:
-- ✅ Use **deterministic builds** (reproducible builds)
-- ✅ Include **portable PDB files** (not Windows PDB format)
-- ✅ Have **symbols available** (embedded or in .snupkg)
-
-Many packages don't meet all these requirements, especially older packages or those not built with modern SDK-style projects.
-
-### Current Limitations
-- Only supports portable PDB format (not Windows PDB)
-- Cannot access private symbol servers
-- Does not yet construct actual CompLog files
-- Multi-targeting packages process all TFMs separately
-
-## Roadmap / TODO
-
-The code includes extensive comments about what needs to be implemented for full CompLog creation:
-
-### 1. Dependency Resolution
-- Parse .nuspec files from extracted packages
-- Recursively download all package dependencies
-- Handle dependency version ranges
-- Resolve dependencies per target framework
-
-### 2. Framework Assembly Resolution  
-- Identify target framework from compiler arguments
-- Download reference assemblies (e.g., `Microsoft.NETCore.App.Ref`)
-- Handle different framework versions (net8.0, netstandard2.0, etc.)
-- Optionally use local SDK reference assemblies
-
-### 3. Source Code Extraction
-- Extract embedded source from PDBs
-- Parse Source Link JSON mappings
-- Download source files from git repositories
-- Preserve directory structure for Roslyn workspace
-
-### 4. CompLog Packaging
-- Create standardized directory structure
-- Package all references, sources, and compiler arguments
-- Ensure deterministic/reproducible output
-- Define compression format
-
-### 5. Validation
-- Verify all required references are available
-- Check source file integrity
-- Validate compiler arguments completeness
-- Test Roslyn workspace recreation
-
-## Building
+## Quick Start
 
 ```bash
-cd NuGetToCompLog
+# Clone and build
+git clone https://github.com/username/nuget-to-complog.git
+cd nuget-to-complog
 dotnet build
-dotnet run -- <package-id> [version]
+
+# Extract a package's compilation info
+dotnet run -- Newtonsoft.Json 13.0.3
 ```
 
-## Dependencies
+This creates a `.complog` file in your current directory with all the compilation details.
 
-- **NuGet.Protocol** - For downloading packages from nuget.org
-- **System.Reflection.Metadata** - For reading portable PDB files
-- **System.IO.Compression** - For extracting .nupkg/.snupkg files
-- **Spectre.Console** - For beautiful, rich console output
+## How it works
 
-## Example Output
+1. **Downloads the package** from nuget.org
+2. **Finds the PDB files** (debug symbols with compiler information)
+3. **Extracts compiler settings** like optimization flags, target framework, and references
+4. **Packages everything** into a portable `.complog` file
 
-```
-Processing package: System.Text.Json 8.0.0
-Working directory: /tmp/nuget-to-complog/62e743b4-544d-4a21-8e5b-c46e467c4f48
+## Important note
 
-✓ Downloaded package to: /tmp/.../System.Text.Json.8.0.0.nupkg
-✓ Extracted package to: /tmp/.../extracted
-✓ Found 5 assemblies:
-  - lib/netstandard2.0/System.Text.Json.dll
-  - lib/net6.0/System.Text.Json.dll
-  - lib/net8.0/System.Text.Json.dll
-  - lib/net462/System.Text.Json.dll
-  - lib/net7.0/System.Text.Json.dll
+Not all packages include the necessary information. For a CompLog to be created successfully, the package needs to have been built with:
+- Deterministic builds enabled
+- Portable PDB files (not Windows PDB format)
+- Embedded or available symbols
 
-⚠ Symbols package (.snupkg) not found
+Most modern packages meet these requirements, but older packages or packages not built with SDK-style projects may not. The tool handles this gracefully—if information can't be found, it will tell you why.
 
-Processing assembly: System.Text.Json.dll
-================================================================================
-  ✓ Found embedded PDB
-  
-  COMPILATION OPTIONS:
-  ----------------------------------------------------------------------------
-  Compiler Arguments:
-    /debug+
-    /optimize+
-    /deterministic+
-    /langversion:preview
-    ...
-```
+## What you get
 
-## Contributing
+The `.complog` file contains:
+- Exact compiler command-line arguments
+- All referenced assemblies and their versions
+- Source file paths and content
+- Metadata about the build
 
-This is a foundational implementation. Key areas for contribution:
-- Implementing dependency resolution
-- Adding framework assembly download
-- Source code extraction from Source Link
-- CompLog file format definition and packaging
-- Better error handling for missing symbols
-- Support for Windows PDB format
+You can then use the `complog` CLI tool to extract or replay the compilation.
 
-## License
+## Need more details?
 
-(Add your license here)
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Deep technical details about how the tool works
+- **[PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)** - Project overview
+- **[CHANGELOG.md](CHANGELOG.md)** - What's changed
