@@ -248,3 +248,77 @@ This is **sufficient for supply chain verification** because:
 - ✅ Tamper detection is possible (code changes alter metadata)
 
 **Recommendation**: Use this tool for supply chain verification. The tool now correctly captures everything needed for functional and semantic verification, with the limitation that strong-name signatures cannot be reproduced without access to the publisher's private key.
+
+## Future Enhancement: Signing Key Extraction
+
+### The Opportunity
+
+For OSS packages like Serilog, the strong-name signing key (.snk file) is typically available in the public repository. This could theoretically be used to achieve **true byte-for-byte identical** builds.
+
+### Why It's Not Implemented Yet
+
+1. **Repository Discovery**: The .nupkg doesn't contain repository URL or key location
+   - Would need to extract from package metadata (not available)
+   - Or rely on conventions (e.g., `.snk` in repo root)
+   - Too fragile and package-specific
+
+2. **Key Extraction Complexity**: Finding the key requires:
+   - Repository access (GitHub API)
+   - File discovery (could be anywhere)
+   - Repository cloning (overhead)
+   - Trust decisions (should we auto-extract keys?)
+
+3. **Limited Scope**: Only works for:
+   - Public OSS repositories
+   - Packages with published .snk files
+   - Projects we have permission to access
+
+4. **Current Solution Is Sufficient**:
+   - IL code verification already works
+   - Metadata comparison is reliable
+   - 512-byte signature is acceptable overhead
+   - No security risk of extracting keys we don't have
+
+### How Users Can Achieve Byte-for-Byte Matching
+
+If you have access to the signing key and want to verify byte-for-byte identity:
+
+```bash
+# 1. Rebuild using CompLog
+dotnet run -- Serilog 4.3.0
+
+# 2. Clone the repository and find the signing key
+git clone https://github.com/serilog/serilog.git
+# Look for: serilog.snk or similar
+
+# 3. Sign the rebuilt assembly
+sn -R bin/Release/net9.0/Serilog.dll ../serilog/serilog.snk
+
+# 4. Compare with original
+# Should now be byte-for-byte identical
+md5sum Serilog-4.3.0-complog/bin/Release/net9.0/Serilog.dll
+md5sum /path/to/original/Serilog.dll
+```
+
+### Potential Future Implementation
+
+If this becomes a priority, we could:
+
+1. **Extract public key token** from assembly
+2. **Search GitHub** for common .snk locations in matching repository
+3. **Optionally download and apply** signing key
+4. **Re-sign** the rebuilt assembly
+5. **Verify** byte-for-byte match
+
+This would be an opt-in feature with clear security warnings about extracting and using private keys.
+
+### Why Current Approach Is Better
+
+For supply chain verification purposes, **IL/metadata matching is actually better** because:
+
+- ✓ Works for all packages (signed or unsigned)
+- ✓ Doesn't require repository access
+- ✓ No key extraction security concerns
+- ✓ Proves compilation integrity (which matters)
+- ✓ Verifies IL code is untampered (which matters)
+- ✗ Signature difference is just metadata
