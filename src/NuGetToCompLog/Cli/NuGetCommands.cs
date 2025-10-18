@@ -1,5 +1,6 @@
 using ConsoleAppFramework;
 using Microsoft.Extensions.DependencyInjection;
+using NuGetToCompLog.Abstractions;
 using NuGetToCompLog.Commands;
 
 namespace NuGetToCompLog.Cli;
@@ -11,10 +12,12 @@ namespace NuGetToCompLog.Cli;
 public class NuGetCommands
 {
     private readonly ProcessPackageCommandHandler _handler;
+    private readonly IConsoleWriter _console;
 
-    public NuGetCommands(ProcessPackageCommandHandler handler)
+    public NuGetCommands(ProcessPackageCommandHandler handler, IConsoleWriter console)
     {
         _handler = handler;
+        _console = console;
     }
 
     /// <summary>
@@ -27,12 +30,20 @@ public class NuGetCommands
         [Argument] string packageId,
         [Argument] string? version = null)
     {
-        var command = new ProcessPackageCommand(packageId, version);
-        var result = await _handler.HandleAsync(command);
-
-        if (result == null)
+        _console.SetIndeterminateProgress();
+        try
         {
-            throw new Exception("Failed to process package");
+            var command = new ProcessPackageCommand(packageId, version);
+            var result = await _handler.HandleAsync(command);
+
+            if (result == null)
+            {
+                throw new Exception("Failed to process package");
+            }
+        }
+        finally
+        {
+            _console.ClearProgress();
         }
     }
 }

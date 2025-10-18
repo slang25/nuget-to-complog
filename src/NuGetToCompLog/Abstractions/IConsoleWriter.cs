@@ -39,4 +39,14 @@ public interface IConsoleWriter
     /// Executes an action with a status/spinner display.
     /// </summary>
     Task ExecuteWithStatusAsync(string status, Func<Task> action);
+    
+    /// <summary>
+    /// Sets an indeterminate (spinning) progress indicator for the terminal.
+    /// </summary>
+    void SetIndeterminateProgress();
+    
+    /// <summary>
+    /// Clears the progress indicator from the terminal.
+    /// </summary>
+    void ClearProgress();
 }
