@@ -18,7 +18,7 @@
     <PackageReference Include="System.IO.Compression" Version="4.3.0" />
     <PackageReference Include="System.Reflection.Metadata" Version="9.0.9" />
     <PackageReference Include="System.Text.Json" Version="9.0.9" />
-    <PackageReference Include="Basic.CompilerLog.Util" Version="0.9.19" />
+    <PackageReference Include="Basic.CompilerLog.Util" Version="0.9.21" />
     <PackageReference Include="IgnoresAccessChecksToGenerator" Version="0.8.0" PrivateAssets="All" />
   </ItemGroup>
   <ItemGroup>

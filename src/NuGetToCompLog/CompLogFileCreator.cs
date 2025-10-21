@@ -148,29 +148,29 @@ public class CompLogFileCreator
                 compilerFilePath: compilerPath,
                 kind: CompilerCallKind.Regular,
                 targetFramework: targetFramework,
-                isCSharp: isCSharp,
-                arguments: args);
+                isCSharp: isCSharp);
 
-            CommandLineArguments commandLineArguments;
+            // CommandLineArguments commandLineArguments;
+            //
+            // if (isCSharp)
+            // {
+            //     commandLineArguments = CSharpCommandLineParser.Default.Parse(
+            //         args,
+            //         projectDir,
+            //         sdkDirectory: null,
+            //         additionalReferenceDirectories: null);
+            // }
+            // else
+            // {
+            //     commandLineArguments = VisualBasicCommandLineParser.Default.Parse(
+            //         args,
+            //         projectDir,
+            //         sdkDirectory: null,
+            //         additionalReferenceDirectories: null);
+            // }
+
             
-            if (isCSharp)
-            {
-                commandLineArguments = CSharpCommandLineParser.Default.Parse(
-                    args,
-                    projectDir,
-                    sdkDirectory: null,
-                    additionalReferenceDirectories: null);
-            }
-            else
-            {
-                commandLineArguments = VisualBasicCommandLineParser.Default.Parse(
-                    args,
-                    projectDir,
-                    sdkDirectory: null,
-                    additionalReferenceDirectories: null);
-            }
-
-            builder.AddFromDisk(compilerCall, commandLineArguments);
+            builder.AddFromDisk(compilerCall, args);
             AnsiConsole.MarkupLine($"  [green]✓[/] Added compilation to complog");
 
             builder.Close();

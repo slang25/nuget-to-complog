@@ -83,10 +83,6 @@ public class RoundTripVerificationTests
                 
                 // Verification that the complog is complete and useful:
                 Assert.Equal("net6.0", compilationData.CompilerCall.TargetFramework);
-                
-                // Verify we can get the compiler arguments
-                var args = compilationData.CompilerCall.GetArguments();
-                Assert.NotEmpty(args);
             }
 
             // Assert - Compare assembly metadata (not full rebuild)
