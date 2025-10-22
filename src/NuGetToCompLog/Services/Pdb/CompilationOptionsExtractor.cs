@@ -76,15 +76,14 @@ public class CompilationOptionsExtractor
         // The PDB only contains a subset of compiler arguments (key-value pairs + some flags).
         // Add common compiler flags that are typically present but not stored in PDB.
         // These are MSBuild-generated arguments that ensure compatibility with original builds.
+        // Note: We do NOT include /nowarn or /warnaserror as we cannot determine these from the package.
         var additionalArgs = new List<string>
         {
             "/unsafe-",
             "/checked-",
-            "/nowarn:CS1701,CS1702,CS1591,NU5105,1701,1702",
             "/fullpaths",
             "/nostdlib+",
-            "/errorreport:prompt",
-            "/warn:9"
+            "/errorreport:prompt"
         };
         
         // Insert these at the beginning to match typical csc.exe argument order

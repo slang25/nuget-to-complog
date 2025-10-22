@@ -339,9 +339,6 @@ public class CompLogFileCreator
             args.Add($"/target:{target}");
         }
         
-        // /warnaserror+ (if applicable)
-        args.Add("/warnaserror+");
-        
         // /utf8output
         args.Add("/utf8output");
         

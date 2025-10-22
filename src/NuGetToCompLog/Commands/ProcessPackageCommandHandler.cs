@@ -89,7 +89,17 @@ public class ProcessPackageCommandHandler
                 _console.WriteLine();
             }
 
-            await TryDownloadSymbolsAsync(package, workingDirectory, cancellationToken);
+            // Check if selected assemblies have embedded PDBs - if so, skip snupkg download
+            var hasEmbeddedPdb = selectedAssemblies.Any(a => _pdbDiscovery.HasEmbeddedPdb(a));
+            if (!hasEmbeddedPdb)
+            {
+                await TryDownloadSymbolsAsync(package, workingDirectory, cancellationToken);
+            }
+            else
+            {
+                _console.MarkupLine("[dim]⚠ Skipping symbols package download - selected assemblies have embedded PDBs[/]");
+                _console.WriteLine();
+            }
 
             _console.MarkupLine($"  [cyan]→[/] Processing {selectedAssemblies.Count} assembly/assemblies from TFM: [yellow]{selectedTfm}[/]");
             
