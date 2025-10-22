@@ -261,17 +261,141 @@ public class CompLogFileCreator
     {
         var args = new List<string>();
         
-        var sourcesDir = Path.Combine(workingDirectory, "sources");
+        // Step 1: Add compiler flags in proper order to match csc.exe
+        // These are typically at the beginning of the argument list
         
-        if (Directory.Exists(sourcesDir))
+        // Basic compiler flags (from __extra_args__)
+        if (argsDict.TryGetValue("__extra_args__", out var extraArgs))
         {
-            foreach (var sourceFile in Directory.GetFiles(sourcesDir, "*.cs", SearchOption.AllDirectories))
+            args.AddRange(extraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        }
+        
+        // /define: - Note: use semicolon separator to match original builds
+        if (argsDict.TryGetValue("define", out var defines))
+        {
+            args.Add($"/define:{defines.Replace(",", ";")}");
+        }
+        
+        // /highentropyva+ comes before debug flags
+        if (debugConfig.HighEntropyVA)
+        {
+            args.Add("/highentropyva+");
+        }
+        
+        // Debug flags
+        string? pdbOutputPath = null;
+        if (debugConfig.DebugType == DebugType.PortableExternal && !string.IsNullOrEmpty(debugConfig.PdbPath))
+        {
+            var pdbFileName = Path.GetFileName(debugConfig.PdbPath);
+            pdbOutputPath = $"output/{pdbFileName}";
+        }
+        var debugFlags = debugConfig.ToCompilerFlags(pdbOutputPath).Where(f => !f.StartsWith("/highentropyva"));
+        args.AddRange(debugFlags);
+        
+        // /filealign:
+        args.Add("/filealign:512");
+        
+        // /optimize
+        if (argsDict.TryGetValue("optimization", out var optimization))
+        {
+            var optimizationValue = optimization.Equals("release", StringComparison.OrdinalIgnoreCase) ||
+                                   optimization.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                                   optimization.Equals("1", StringComparison.OrdinalIgnoreCase);
+            args.Add($"/optimize{(optimizationValue ? "+" : "-")}");
+        }
+        
+        // Pathmap (must come before /target to match ordering)
+        if (!string.IsNullOrEmpty(debugConfig.PdbPath))
+        {
+            var pdbDir = Path.GetDirectoryName(debugConfig.PdbPath);
+            if (!string.IsNullOrEmpty(pdbDir))
             {
-                var relativePath = Path.GetRelativePath(sourcesDir, sourceFile);
-                args.Add(relativePath);
+                args.Add($"/pathmap:output/={pdbDir}/");
+                var pdbPathParts = debugConfig.PdbPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                if (pdbPathParts.Length >= 3 && pdbPathParts[0] == "_" && pdbPathParts[1] == "src")
+                {
+                    var packageName = pdbPathParts[2];
+                    args.Add($"/pathmap:src/=/_/src/{packageName}/");
+                }
             }
         }
-
+        else
+        {
+            args.Add($"/pathmap:src/=/");
+        }
+        
+        // /target:
+        if (argsDict.TryGetValue("output-kind", out var outputKind))
+        {
+            var target = outputKind switch
+            {
+                "ConsoleApplication" => "exe",
+                "WindowsApplication" => "winexe",
+                "DynamicallyLinkedLibrary" => "library",
+                "NetModule" => "module",
+                "WindowsRuntimeMetadata" => "winmdobj",
+                _ => "library"
+            };
+            args.Add($"/target:{target}");
+        }
+        
+        // /warnaserror+ (if applicable)
+        args.Add("/warnaserror+");
+        
+        // /utf8output
+        args.Add("/utf8output");
+        
+        // /deterministic+ - essential for reproducible builds (moved here to match original order)
+        if (debugConfig.HasReproducible)
+        {
+            args.Add("/deterministic+");
+        }
+        
+        // /langversion:
+        if (argsDict.TryGetValue("language-version", out var langVersion))
+        {
+            args.Add($"/langversion:{langVersion}");
+        }
+        
+        // /features:strict
+        args.Add("/features:strict");
+        
+        // Additional metadata args
+        foreach (var kvp in argsDict)
+        {
+            // Skip already processed or metadata-only keys
+            if (kvp.Key == "source-file-count" || kvp.Key == "version" || 
+                kvp.Key == "compiler-version" || kvp.Key == "language" ||
+                kvp.Key == "__extra_args__" || kvp.Key == "define" ||
+                kvp.Key == "optimization" || kvp.Key == "output-kind" ||
+                kvp.Key == "language-version") 
+                continue;
+            
+            var argName = kvp.Key switch
+            {
+                "runtime-version" => "runtimemetadataversion",
+                _ => kvp.Key
+            };
+            
+            args.Add($"/{argName}:{kvp.Value}");
+        }
+        
+        // Step 2: Add source files
+        var sourcesDir = Path.Combine(workingDirectory, "sources");
+        if (Directory.Exists(sourcesDir))
+        {
+            var sourceFiles = Directory.GetFiles(sourcesDir, "*.cs", SearchOption.AllDirectories)
+                .Select(f => Path.GetRelativePath(sourcesDir, f))
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            
+            foreach (var sourceFile in sourceFiles)
+            {
+                args.Add(sourceFile);
+            }
+        }
+        
+        // Step 3: Add embedded resource files
         var resourcesDir = Path.Combine(workingDirectory, "resources");
         var resourceMappingsFile = Path.Combine(workingDirectory, "resource-mappings.txt");
         
@@ -295,110 +419,30 @@ public class CompLogFileCreator
                 }
             }
         }
-
-        foreach (var kvp in argsDict)
-        {
-            if (kvp.Key == "source-file-count" || kvp.Key == "version" || 
-                kvp.Key == "compiler-version" || kvp.Key == "language" ||
-                kvp.Key == "__extra_args__") 
-                continue;
-            
-            if (kvp.Key == "output-kind")
-            {
-                var target = kvp.Value switch
-                {
-                    "ConsoleApplication" => "exe",
-                    "WindowsApplication" => "winexe",
-                    "DynamicallyLinkedLibrary" => "library",
-                    "NetModule" => "module",
-                    "WindowsRuntimeMetadata" => "winmdobj",
-                    _ => "library"
-                };
-                args.Add($"/target:{target}");
-                continue;
-            }
-            
-            if (kvp.Key == "optimization")
-            {
-                var optimizationValue = kvp.Value.Equals("release", StringComparison.OrdinalIgnoreCase) ||
-                                       kvp.Value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
-                                       kvp.Value.Equals("1", StringComparison.OrdinalIgnoreCase);
-                args.Add($"/optimize{(optimizationValue ? "+" : "-")}");
-                continue;
-            }
-            
-            var argName = kvp.Key switch
-            {
-                "runtime-version" => "runtimemetadataversion",
-                _ => kvp.Key
-            };
-            
-            args.Add($"/{argName}:{kvp.Value}");
-        }
-
-        if (argsDict.TryGetValue("__extra_args__", out var extraArgs))
-        {
-            args.AddRange(extraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries));
-        }
         
-        string? pdbOutputPath = null;
-        if (debugConfig.DebugType == DebugType.PortableExternal && !string.IsNullOrEmpty(debugConfig.PdbPath))
-        {
-            var pdbFileName = Path.GetFileName(debugConfig.PdbPath);
-            pdbOutputPath = $"output/{pdbFileName}";
-        }
-        
-        var debugFlags = debugConfig.ToCompilerFlags(pdbOutputPath);
-        args.AddRange(debugFlags);
+        // Step 4: Add references (sorted alphabetically)
+        var sortedReferences = acquiredReferences.Values
+            .OrderBy(r => Path.GetFileName(r), StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
-        foreach (var reference in acquiredReferences.Values)
+        
+        foreach (var reference in sortedReferences)
         {
             args.Add($"/reference:{reference}");
         }
 
+        // Step 5: Add output arguments
         var outputPath = assemblyPath;
+        var outputFileName = Path.GetFileNameWithoutExtension(outputPath);
+        
+        // Add /doc: argument for XML documentation output
+        args.Add($"/doc:output/{outputFileName}.xml");
+        
         args.Add($"/out:{outputPath}");
         
-        // Add pathmap to make embedded paths match the original build
-        // CRITICAL: Use RELATIVE paths so they work when complog is exported/replayed!
-        //
-        // When complog export runs, it creates this structure:
-        // - ProjectName/
-        //   - src/           (source files)
-        //   - output/        (where DLL will be built)
-        //   - build.rsp      (compiler arguments)
-        //
-        // The pathmap needs to work from that exported directory structure.
-        // We want: src/ -> /_/src/PackageName/
-        //      and: output/ -> /_/src/PackageName/obj/Release/TFM/
-        
-        if (!string.IsNullOrEmpty(debugConfig.PdbPath))
-        {
-            // The PDB path gives us the original build structure
-            // Example: /_/src/Serilog/obj/Release/net9.0/Serilog.pdb
-            //
-            // Extract the package name and use RELATIVE paths in pathmap
-            var pdbDir = Path.GetDirectoryName(debugConfig.PdbPath);
-            
-            if (!string.IsNullOrEmpty(pdbDir))
-            {
-                // Use relative path "output/" for the output directory
-                // This will be resolved relative to where compilation runs (the exported project directory)
-                args.Add($"/pathmap:output/={pdbDir}/");
-                
-                // Extract package name from PDB path: /_/src/PackageName/obj/...
-                var pdbPathParts = debugConfig.PdbPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
-                if (pdbPathParts.Length >= 3 && pdbPathParts[0] == "_" && pdbPathParts[1] == "src")
-                {
-                    var packageName = pdbPathParts[2];
-                    args.Add($"/pathmap:src/=/_/src/{packageName}/");
-                }
-            }
-        }
-        else
-        {
-            args.Add($"/pathmap:src/=/");
-        }
+        // Add /refout: argument for reference assembly output
+        // Reference assemblies are typically output to a separate directory
+        args.Add($"/refout:output/group0/{outputFileName}.dll");
 
         return args.ToArray();
     }

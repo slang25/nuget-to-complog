@@ -37,23 +37,9 @@ public class CompilationOptionsExtractor
 
                 var args = ParseCompilerArguments(options);
 
-                if (hasEmbeddedPdb)
-                {
-                    args.Add("/debug:embedded");
-                }
-                else
-                {
-                    // External portable PDB - add /debug:portable and /embed- flags
-                    // /embed- explicitly prevents embedding the PDB
-                    // This is critical for deterministic builds with external PDBs
-                    args.Add("/debug:portable");
-                    args.Add("/embed-");
-                }
-
-                if (hasReproducibleMarker)
-                {
-                    args.Add("/deterministic+");
-                }
+                // Note: Debug flags (/debug:portable, /embed-, /deterministic+) are NOT added here
+                // They will be generated later from DebugConfiguration in CompLogFileCreator
+                // to avoid duplication and ensure correct ordering
 
                 compilerArgs.AddRange(args);
 
@@ -78,7 +64,33 @@ public class CompilationOptionsExtractor
     private List<string> ParseCompilerArguments(string options)
     {
         // Compiler arguments are stored as null-terminated strings
-        return options.Split('\0', StringSplitOptions.RemoveEmptyEntries).ToList();
+        var args = options.Split('\0', StringSplitOptions.RemoveEmptyEntries).ToList();
+        
+        // Filter out debug-related flags that will be generated later from DebugConfiguration
+        // These include /debug:*, /embed*, /deterministic+, etc.
+        args = args.Where(arg => 
+            !arg.StartsWith("/debug:", StringComparison.OrdinalIgnoreCase) &&
+            !arg.StartsWith("/embed", StringComparison.OrdinalIgnoreCase) &&
+            !arg.Equals("/deterministic+", StringComparison.OrdinalIgnoreCase)).ToList();
+        
+        // The PDB only contains a subset of compiler arguments (key-value pairs + some flags).
+        // Add common compiler flags that are typically present but not stored in PDB.
+        // These are MSBuild-generated arguments that ensure compatibility with original builds.
+        var additionalArgs = new List<string>
+        {
+            "/unsafe-",
+            "/checked-",
+            "/nowarn:CS1701,CS1702,CS1591,NU5105,1701,1702",
+            "/fullpaths",
+            "/nostdlib+",
+            "/errorreport:prompt",
+            "/warn:9"
+        };
+        
+        // Insert these at the beginning to match typical csc.exe argument order
+        args.InsertRange(0, additionalArgs);
+        
+        return args;
     }
 
     private string? ExtractTargetFramework(List<string> args)

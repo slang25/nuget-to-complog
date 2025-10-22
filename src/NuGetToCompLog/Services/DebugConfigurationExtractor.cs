@@ -136,6 +136,8 @@ public class DebugConfiguration
                 
             case DebugType.PortableExternal:
                 // External portable PDB
+                // Add /debug- first to disable other debug modes, then /debug:portable
+                flags.Add("/debug-");
                 flags.Add("/debug:portable");
                 
                 // CRITICAL: Explicitly prevent PDB embedding for external PDBs
