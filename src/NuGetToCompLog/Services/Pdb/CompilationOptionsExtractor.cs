@@ -8,9 +8,13 @@ namespace NuGetToCompLog.Services.Pdb;
 /// </summary>
 public class CompilationOptionsExtractor
 {
-    // Custom debug information GUIDs
+    // Custom debug information GUIDs (per Portable PDB specification)
     private const string CompilationOptionsGuid = "B5FEEC05-8CD0-4A83-96DA-466284BB4BD8";
     private const string MetadataReferencesGuid = "7E4D4708-096E-4C5C-AEDA-CB10BA6A740D";
+    
+    // GUID constants for other PDB custom debug information types
+    internal const string SourceLinkGuid = "CC110556-A091-4D38-9FEC-25AB9A351A6A";
+    internal const string EmbeddedSourceGuid = "0E8A571B-6926-466E-B4AD-8AB04611F5FE";
 
     /// <summary>
     /// Extracts compilation information from a PDB metadata reader.
@@ -24,6 +28,8 @@ public class CompilationOptionsExtractor
         var compilerArgs = new List<string>();
         var metadataRefs = new List<MetadataReference>();
         string? targetFramework = null;
+        string? defaultEncoding = null;
+        string? fallbackEncoding = null;
 
         foreach (var cdiHandle in metadataReader.GetCustomDebugInformation(EntityHandle.ModuleDefinition))
         {
@@ -44,6 +50,9 @@ public class CompilationOptionsExtractor
                 compilerArgs.AddRange(args);
 
                 targetFramework = ExtractTargetFramework(args);
+                
+                // Extract encoding information from PDB key-value pairs
+                (defaultEncoding, fallbackEncoding) = ExtractEncodingInfo(options);
             }
 
             if (guid.ToString().Equals(MetadataReferencesGuid, StringComparison.OrdinalIgnoreCase))
@@ -58,7 +67,9 @@ public class CompilationOptionsExtractor
             metadataRefs,
             targetFramework,
             hasEmbeddedPdb,
-            hasReproducibleMarker));
+            hasReproducibleMarker,
+            defaultEncoding,
+            fallbackEncoding));
     }
 
     private List<string> ParseCompilerArguments(string options)
@@ -72,6 +83,15 @@ public class CompilationOptionsExtractor
             !arg.StartsWith("/debug:", StringComparison.OrdinalIgnoreCase) &&
             !arg.StartsWith("/embed", StringComparison.OrdinalIgnoreCase) &&
             !arg.Equals("/deterministic+", StringComparison.OrdinalIgnoreCase)).ToList();
+        
+        // Handle portability policy if present (legacy Silverlight-era feature)
+        // Values: 0 = NoPlatformWarnings, 1 = SuppressSilverlightPlatformWarnings, 
+        //         2 = SuppressSilverlightLibraryWarnings, 3 = SuppressAllWarnings
+        var portabilityPolicy = ExtractKeyValue(options, "portability-policy");
+        if (portabilityPolicy != null && int.TryParse(portabilityPolicy, out var policy) && policy > 0)
+        {
+            args.Add($"/portable-policy:{policy}");
+        }
         
         // The PDB only contains a subset of compiler arguments (key-value pairs + some flags).
         // Add common compiler flags that are typically present but not stored in PDB.
@@ -90,6 +110,28 @@ public class CompilationOptionsExtractor
         args.InsertRange(0, additionalArgs);
         
         return args;
+    }
+
+    private (string? defaultEncoding, string? fallbackEncoding) ExtractEncodingInfo(string options)
+    {
+        var defaultEncoding = ExtractKeyValue(options, "default-encoding");
+        var fallbackEncoding = ExtractKeyValue(options, "fallback-encoding");
+        
+        return (defaultEncoding, fallbackEncoding);
+    }
+
+    private string? ExtractKeyValue(string options, string key)
+    {
+        // PDB key-value pairs are stored as "key:value\0" in the options string
+        var kvPairs = options.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var pair in kvPairs)
+        {
+            if (pair.StartsWith($"{key}:", StringComparison.OrdinalIgnoreCase))
+            {
+                return pair.Substring(key.Length + 1);
+            }
+        }
+        return null;
     }
 
     private string? ExtractTargetFramework(List<string> args)

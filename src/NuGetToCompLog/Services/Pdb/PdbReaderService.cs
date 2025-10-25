@@ -105,7 +105,7 @@ public class PdbReaderService : IPdbReader
             var embeddedSource = metadataReader.GetCustomDebugInformation(docHandle)
                 .Select(h => metadataReader.GetCustomDebugInformation(h))
                 .Where(cdi => metadataReader.GetGuid(cdi.Kind).ToString()
-                    .Equals("0E8A571B-6926-466E-B4AD-8AB04611F5FE", StringComparison.OrdinalIgnoreCase))
+                    .Equals(CompilationOptionsExtractor.EmbeddedSourceGuid, StringComparison.OrdinalIgnoreCase))
                 .Cast<CustomDebugInformation?>()
                 .FirstOrDefault();
 
@@ -129,7 +129,7 @@ public class PdbReaderService : IPdbReader
         var sourceLinkHandle = metadataReader.GetCustomDebugInformation(EntityHandle.ModuleDefinition)
             .Select(h => metadataReader.GetCustomDebugInformation(h))
             .FirstOrDefault(cdi => metadataReader.GetGuid(cdi.Kind).ToString()
-                .Equals("CC110556-A091-4D38-9FEC-25AB9A351A6A", StringComparison.OrdinalIgnoreCase));
+                .Equals(CompilationOptionsExtractor.SourceLinkGuid, StringComparison.OrdinalIgnoreCase));
 
         if (sourceLinkHandle.Kind != default)
         {

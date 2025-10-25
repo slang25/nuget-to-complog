@@ -8,14 +8,18 @@ public record CompilationInfo(
     List<MetadataReference> MetadataReferences,
     string? TargetFramework,
     bool HasEmbeddedPdb,
-    bool HasDeterministicMarker)
+    bool HasDeterministicMarker,
+    string? DefaultEncoding = null,
+    string? FallbackEncoding = null)
 {
     public CompilationInfo() : this(
         new List<string>(),
         new List<MetadataReference>(),
         null,
         false,
-        false)
+        false,
+        null,
+        null)
     {
     }
 }
