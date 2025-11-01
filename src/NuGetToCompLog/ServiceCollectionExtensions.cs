@@ -26,7 +26,14 @@ public static class ServiceCollectionExtensions
         // Infrastructure services
         services.AddSingleton<IFileSystemService, FileSystemService>();
         services.AddSingleton<IConsoleWriter, SpectreConsoleWriter>();
-        services.AddSingleton<ISourceFileDownloader, HttpSourceFileDownloader>();
+        services.AddSingleton<SourceFileDecompilerService>();
+        services.AddSingleton<ISourceFileDownloader>(sp =>
+        {
+            var fileSystem = sp.GetRequiredService<IFileSystemService>();
+            var console = sp.GetRequiredService<IConsoleWriter>();
+            var decompiler = sp.GetRequiredService<SourceFileDecompilerService>();
+            return new HttpSourceFileDownloader(fileSystem, console, decompiler);
+        });
 
         // NuGet services
         services.AddSingleton<INuGetClient, NuGetClientService>();

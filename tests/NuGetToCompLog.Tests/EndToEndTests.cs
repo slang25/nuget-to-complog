@@ -1,5 +1,6 @@
 using NuGetToCompLog;
 using NuGetToCompLog.Commands;
+using NuGetToCompLog.Abstractions;
 using Microsoft.Extensions.DependencyInjection;
 using NuGet.Common;
 using NuGet.Protocol;
@@ -222,5 +223,118 @@ public class EndToEndTests
         }
 
         return packagePath;
+    }
+
+    [Fact(Skip = "Integration test - requires network access and can take several minutes")]
+    public async Task AWSSDK_SQS_ShouldDecompileMissingGeneratedFiles()
+    {
+        // Clean up any pre-existing AWSSDK.SQS artifacts
+        var existingDir = Directory.GetDirectories(Directory.GetCurrentDirectory())
+            .FirstOrDefault(d => d.Contains("AWSSDK.SQS"));
+        if (existingDir != null && Directory.Exists(existingDir))
+        {
+            Directory.Delete(existingDir, true);
+        }
+        
+        var existingFile = Path.Combine(Directory.GetCurrentDirectory(), "AWSSDK.SQS.*.complog");
+        var existingFiles = Directory.GetFiles(Directory.GetCurrentDirectory(), "AWSSDK.SQS.*.complog");
+        foreach (var file in existingFiles)
+        {
+            File.Delete(file);
+        }
+
+        // Arrange & Act - Run the full extraction process
+        var services = new ServiceCollection();
+        services.AddNuGetToCompLogServices();
+        await using var serviceProvider = services.BuildServiceProvider();
+        
+        var handler = serviceProvider.GetRequiredService<ProcessPackageCommandHandler>();
+        // Use a specific version for testing - AWSSDK.SQS has many versions, let's use a recent one
+        // First, let's try getting the latest version manually to see what it is
+        var nugetClient = serviceProvider.GetRequiredService<NuGetToCompLog.Abstractions.INuGetClient>();
+        var latestVersion = await nugetClient.GetLatestVersionAsync("AWSSDK.SQS", CancellationToken.None);
+        Assert.NotNull(latestVersion);
+        Assert.NotEmpty(latestVersion);
+        
+        var command = new ProcessPackageCommand("AWSSDK.SQS", latestVersion);
+        var result = await handler.HandleAsync(command, CancellationToken.None);
+        
+        // Ensure the handler completed successfully
+        if (result == null)
+        {
+            // If result is null, the handler likely encountered an exception
+            // Let's check if there are any temp directories created which might give us a clue
+            var tempDirs = Directory.GetDirectories(Path.GetTempPath(), "nuget-to-complog-*");
+            if (tempDirs.Length > 0)
+            {
+                var latestDir = tempDirs.OrderByDescending(d => Directory.GetCreationTime(d)).First();
+                Assert.Fail($"Handler returned null. Check temp directory for details: {latestDir}");
+            }
+            else
+            {
+                Assert.Fail("Handler returned null and no temp directory was created.");
+            }
+        }
+        Assert.NotNull(result);
+        Assert.True(File.Exists(result), $"CompLog file should be created at: {result}");
+
+        // The tool will have created a complog structure directory
+        var complogStructureDir = Directory.GetDirectories(Directory.GetCurrentDirectory())
+            .FirstOrDefault(d => d.Contains("AWSSDK.SQS"));
+
+        try
+        {
+            Assert.NotNull(complogStructureDir);
+            Assert.True(Directory.Exists(complogStructureDir), "CompLog structure directory should exist");
+
+            // Assert - Check that source files were extracted
+            var sourcesDir = Path.Combine(complogStructureDir, "sources");
+            Assert.True(Directory.Exists(sourcesDir), "Sources directory should exist");
+
+            var sourceFiles = Directory.GetFiles(sourcesDir, "*.cs", SearchOption.AllDirectories);
+            
+            // AWSSDK.SQS has many generated files (e.g., *.g.cs files) that aren't in git
+            // These should be decompiled. Check that we have a reasonable number of files
+            Assert.True(sourceFiles.Length > 50, 
+                $"Expected many source files, but found only {sourceFiles.Length}. " +
+                "Some files may not have been decompiled.");
+
+            // Check for generated files (these would not be in SourceLink)
+            var generatedFiles = sourceFiles.Where(f => 
+                f.Contains(".g.cs", StringComparison.OrdinalIgnoreCase) ||
+                f.Contains(".Designer.cs", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetFileName(f).StartsWith("Generated", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            // We should have at least some generated files that were decompiled
+            Assert.True(generatedFiles.Count > 0, 
+                $"Expected some generated files to be decompiled, but found {generatedFiles.Count}. " +
+                "Generated files that aren't in git should be decompiled.");
+
+            // Verify the complog file was created
+            var complogFile = Directory.GetFiles(Directory.GetCurrentDirectory(), "AWSSDK.SQS.*.complog")
+                .FirstOrDefault();
+            Assert.NotNull(complogFile);
+            Assert.True(File.Exists(complogFile), "CompLog file should be created");
+            
+            var fileInfo = new FileInfo(complogFile);
+            Assert.True(fileInfo.Length > 100_000, 
+                $"CompLog file seems too small ({fileInfo.Length:N0} bytes). " +
+                "Expected a reasonable size with all source files.");
+        }
+        finally
+        {
+            // Cleanup
+            if (complogStructureDir != null && Directory.Exists(complogStructureDir))
+            {
+                Directory.Delete(complogStructureDir, true);
+            }
+            
+            var complogFiles = Directory.GetFiles(Directory.GetCurrentDirectory(), "AWSSDK.SQS.*.complog");
+            foreach (var file in complogFiles)
+            {
+                File.Delete(file);
+            }
+        }
     }
 }

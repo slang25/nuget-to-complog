@@ -65,10 +65,7 @@ public class FileSystemService : IFileSystemService
 
     public async Task ExtractZipAsync(string zipPath, string destinationPath, bool overwrite)
     {
-        await Task.Run(() =>
-        {
-            ZipFile.ExtractToDirectory(zipPath, destinationPath, overwrite);
-        });
+        await ZipFile.ExtractToDirectoryAsync(zipPath, destinationPath, overwrite);
     }
 
     public string CreateTempDirectory()
