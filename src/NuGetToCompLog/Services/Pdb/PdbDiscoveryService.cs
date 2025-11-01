@@ -39,19 +39,26 @@ public class PdbDiscoveryService
 
         // Get PDB filename from assembly's debug directory
         var pdbFileName = GetPdbFileName(assemblyPath);
-        if (pdbFileName == null)
-        {
-            return null;
-        }
-
+        var dllBaseName = Path.GetFileNameWithoutExtension(assemblyPath);
+        var expectedPdbName = pdbFileName != null ? Path.GetFileName(pdbFileName) : $"{dllBaseName}.pdb";
+        
         // Try multiple locations
         // 1. Same directory as assembly (highest priority)
         var assemblyDir = Path.GetDirectoryName(assemblyPath);
         if (assemblyDir != null)
         {
-            var pdbPath = Path.Combine(assemblyDir, Path.GetFileName(pdbFileName));
-            if (_fileSystem.FileExists(pdbPath))
-                return pdbPath;
+            // First, try the PDB name from the CodeView debug directory (if available)
+            if (pdbFileName != null)
+            {
+                var pdbPath = Path.Combine(assemblyDir, Path.GetFileName(pdbFileName));
+                if (_fileSystem.FileExists(pdbPath))
+                    return pdbPath;
+            }
+            
+            // Fallback: check for PDB with same base name as DLL (common in nupkg packages)
+            var fallbackPdbPath = Path.Combine(assemblyDir, $"{dllBaseName}.pdb");
+            if (_fileSystem.FileExists(fallbackPdbPath))
+                return fallbackPdbPath;
         }
 
         // 2. Symbols package extraction directory - prefer matching TFM
@@ -66,7 +73,7 @@ public class PdbDiscoveryService
                 var tfmMatch = pdbPaths.FirstOrDefault(p =>
                 {
                     var name = Path.GetFileName(p);
-                    if (!name.Equals(Path.GetFileName(pdbFileName), StringComparison.OrdinalIgnoreCase))
+                    if (!name.Equals(expectedPdbName, StringComparison.OrdinalIgnoreCase))
                         return false;
 
                     var pdbRelativePath = Path.GetRelativePath(symbolsDir, p);
@@ -79,7 +86,7 @@ public class PdbDiscoveryService
 
             // Fallback: find any PDB with matching name
             var match = pdbPaths.FirstOrDefault(p =>
-                Path.GetFileName(p).Equals(Path.GetFileName(pdbFileName), StringComparison.OrdinalIgnoreCase));
+                Path.GetFileName(p).Equals(expectedPdbName, StringComparison.OrdinalIgnoreCase));
             if (match != null)
                 return match;
         }
@@ -94,7 +101,7 @@ public class PdbDiscoveryService
                 var tfmMatch = pdbPaths.FirstOrDefault(p =>
                 {
                     var name = Path.GetFileName(p);
-                    if (!name.Equals(Path.GetFileName(pdbFileName), StringComparison.OrdinalIgnoreCase))
+                    if (!name.Equals(expectedPdbName, StringComparison.OrdinalIgnoreCase))
                         return false;
 
                     var pdbRelativePath = Path.GetRelativePath(extractedDir, p);
@@ -106,7 +113,7 @@ public class PdbDiscoveryService
             }
 
             var match = pdbPaths.FirstOrDefault(p =>
-                Path.GetFileName(p).Equals(Path.GetFileName(pdbFileName), StringComparison.OrdinalIgnoreCase));
+                Path.GetFileName(p).Equals(expectedPdbName, StringComparison.OrdinalIgnoreCase));
             if (match != null)
                 return match;
         }

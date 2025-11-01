@@ -38,7 +38,8 @@ public class NuGetCommands
 
             if (result == null)
             {
-                throw new Exception("Failed to process package");
+                Environment.ExitCode = 1;
+                return;
             }
         }
         finally

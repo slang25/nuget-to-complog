@@ -111,6 +111,16 @@ public class ProcessPackageCommandHandler
                 _console.WriteLine();
             }
 
+            // Check if compiler arguments were extracted before attempting to create complog
+            var compilerArgsFile = Path.Combine(workingDirectory, "compiler-arguments.txt");
+            if (!File.Exists(compilerArgsFile))
+            {
+                _console.MarkupLine("[red]✗[/] Cannot create complog - no compiler arguments found");
+                _console.MarkupLine("[yellow]⚠[/] This package does not contain PDBs with compiler arguments");
+                _console.MarkupLine("[dim]   Packages need embedded PDBs or symbol packages (.snupkg) to extract compiler arguments[/]");
+                return null;
+            }
+
             var complogStructurePath = _structureCreator.CreateStructure(
                 command.PackageId,
                 version,
@@ -259,19 +269,42 @@ public class ProcessPackageCommandHandler
         {
             if (pdbPath == null)
             {
-                // Embedded PDB - load into memory first
-                using var peStream = File.OpenRead(assemblyPath);
-                using var peReader = new System.Reflection.PortableExecutable.PEReader(peStream);
-                var embeddedPdb = peReader.ReadDebugDirectory()
-                    .FirstOrDefault(d => d.Type == System.Reflection.PortableExecutable.DebugDirectoryEntryType.EmbeddedPortablePdb);
-                if (embeddedPdb.Type == System.Reflection.PortableExecutable.DebugDirectoryEntryType.EmbeddedPortablePdb)
+                // Embedded PDB - extract bytes into memory before disposing the PE reader
+                // The MetadataReader from ReadEmbeddedPortablePdbDebugDirectoryData depends on
+                // the PEReader, so we must extract the PDB bytes to a separate buffer
+                byte[] pdbBytes;
+                
+                using (var peStream = File.OpenRead(assemblyPath))
+                using (var peReader = new System.Reflection.PortableExecutable.PEReader(peStream))
                 {
-                    var pdbProvider = peReader.ReadEmbeddedPortablePdbDebugDirectoryData(embeddedPdb);
-                    // Note: The provider keeps a reference to the PE reader, so we need to extract the bytes
-                    // For now, we'll just return the reader - it should work for our use case
-                    // The reader is used synchronously and immediately
-                    return pdbProvider.GetMetadataReader();
+                    var embeddedPdb = peReader.ReadDebugDirectory()
+                        .FirstOrDefault(d => d.Type == System.Reflection.PortableExecutable.DebugDirectoryEntryType.EmbeddedPortablePdb);
+                    if (embeddedPdb.Type != System.Reflection.PortableExecutable.DebugDirectoryEntryType.EmbeddedPortablePdb)
+                    {
+                        return null;
+                    }
+                    
+                    // Get the provider while the PEReader is still alive
+                    var tempProvider = peReader.ReadEmbeddedPortablePdbDebugDirectoryData(embeddedPdb);
+                    
+                    // Extract the PDB bytes by reading from the PE image section
+                    // The DataRelativeVirtualAddress points to the embedded PDB blob
+                    var pdbSize = embeddedPdb.DataSize;
+                    pdbBytes = new byte[pdbSize];
+                    
+                    // Read the embedded PDB data from the PE image section
+                    var section = peReader.GetSectionData(embeddedPdb.DataRelativeVirtualAddress);
+                    var span = section.GetContent(0, pdbSize);
+                    span.CopyTo(pdbBytes);
+                    
+                    // Dispose the provider as we've extracted what we need
+                    tempProvider.Dispose();
                 }
+                
+                // Now create a MetadataReader from the extracted bytes (independent of the PE file)
+                var immutableBytes = System.Collections.Immutable.ImmutableArray.Create(pdbBytes);
+                var metadataReaderProvider = System.Reflection.Metadata.MetadataReaderProvider.FromPortablePdbImage(immutableBytes);
+                return metadataReaderProvider.GetMetadataReader();
             }
             else
             {
@@ -287,8 +320,6 @@ public class ProcessPackageCommandHandler
             // If we can't load the PDB, just return null - decompiler can still work without it
             return null;
         }
-        
-        return null;
     }
 
     private async Task SaveMetadataAsync(
