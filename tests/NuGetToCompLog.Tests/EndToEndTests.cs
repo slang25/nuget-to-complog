@@ -30,7 +30,7 @@ public class EndToEndTests
             // Download a known package with embedded PDB (e.g., Newtonsoft.Json)
             var packagePath = await DownloadPackageAsync("Newtonsoft.Json", "13.0.3", tempDir);
             var extractPath = Path.Combine(tempDir, "extracted");
-            await ZipFile.ExtractToDirectoryAsync(packagePath, extractPath);
+            await ZipFile.ExtractToDirectoryAsync(packagePath, extractPath, TestContext.Current.CancellationToken);
 
             // Find the .NET 6.0 assembly (should have embedded PDB)
             var dllPath = Path.Combine(extractPath, "lib", "net6.0", "Newtonsoft.Json.dll");
@@ -150,7 +150,7 @@ public class EndToEndTests
             var compilerArgsFile = Path.Combine(complogStructureDir, "compiler-arguments.txt");
             Assert.True(File.Exists(compilerArgsFile), "Compiler arguments file should exist");
             
-            var compilerArgs = await File.ReadAllTextAsync(compilerArgsFile);
+            var compilerArgs = await File.ReadAllTextAsync(compilerArgsFile, TestContext.Current.CancellationToken);
             Assert.Contains("source-file-count", compilerArgs);
             Assert.Contains("117", compilerArgs);
 
@@ -166,7 +166,7 @@ public class EndToEndTests
             Assert.NotNull(ilLinkFile);
             Assert.True(File.Exists(ilLinkFile), "ILLink.Substitutions.xml should be extracted");
             
-            var ilLinkContent = await File.ReadAllTextAsync(ilLinkFile);
+            var ilLinkContent = await File.ReadAllTextAsync(ilLinkFile, TestContext.Current.CancellationToken);
             Assert.NotEmpty(ilLinkContent);
             Assert.Contains("<linker>", ilLinkContent); // XML file should contain linker element
             Assert.Contains("Serilog", ilLinkContent); // Should reference Serilog assembly

@@ -1,5 +1,4 @@
 using System.Reflection.Metadata;
-using System.Reflection.PortableExecutable;
 using System.IO.Compression;
 using NuGet.Common;
 using NuGet.Protocol;
@@ -24,14 +23,14 @@ public class MetadataReferenceDiagnosticTests
         {
             var packagePath = await DownloadPackageAsync("Newtonsoft.Json", "13.0.3", tempDir);
             var extractPath = Path.Combine(tempDir, "extracted");
-            await ZipFile.ExtractToDirectoryAsync(packagePath, extractPath);
+            await ZipFile.ExtractToDirectoryAsync(packagePath, extractPath, TestContext.Current.CancellationToken);
 
             // Download symbols
             var snupkgPath = await DownloadSymbolsPackageAsync("Newtonsoft.Json", "13.0.3", tempDir);
             if (snupkgPath != null)
             {
                 var symbolsPath = Path.Combine(tempDir, "symbols");
-                await ZipFile.ExtractToDirectoryAsync(snupkgPath, symbolsPath);
+                await ZipFile.ExtractToDirectoryAsync(snupkgPath, symbolsPath, TestContext.Current.CancellationToken);
 
                 // Find a PDB
                 var pdbFiles = Directory.GetFiles(symbolsPath, "*.pdb", SearchOption.AllDirectories);
@@ -123,7 +122,10 @@ public class MetadataReferenceDiagnosticTests
                     return snupkgPath;
                 }
             }
-            catch { }
+            catch
+            {
+                // ignored
+            }
         }
 
         return null;

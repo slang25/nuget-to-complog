@@ -1,7 +1,5 @@
 using NuGet.Common;
 using NuGet.Frameworks;
-using NuGet.Packaging;
-using NuGet.Packaging.Core;
 using NuGet.Protocol;
 using NuGet.Protocol.Core.Types;
 using NuGet.Versioning;
@@ -111,7 +109,7 @@ public class ReferenceAssemblyAcquisitionService
             }
         }
 
-        if (nugetRefs.Count > 0)
+        if (nugetRefs.Count > 0 && !string.IsNullOrEmpty(targetFramework))
         {
             var nugetPaths = await AcquireNuGetReferencesAsync(nugetRefs, targetFramework);
             foreach (var kvp in nugetPaths)
@@ -893,7 +891,7 @@ public class ReferenceAssemblyAcquisitionService
         var tfmNames = tfmFolders.Select(Path.GetFileName).ToList();
         
         // Exact match
-        if (tfmNames.Any(t => t.Equals(targetFramework, StringComparison.OrdinalIgnoreCase)))
+        if (tfmNames.Any(t => t != null && t.Equals(targetFramework, StringComparison.OrdinalIgnoreCase)))
         {
             return tfmFolders.First(f => Path.GetFileName(f).Equals(targetFramework, StringComparison.OrdinalIgnoreCase));
         }

@@ -1,4 +1,3 @@
-using Xunit;
 using Basic.CompilerLog.Util;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
@@ -31,70 +30,63 @@ public class RoundTripVerificationTests
         var packageId = "Newtonsoft.Json";
         var version = "13.0.3";
 
-        try
-        {
-            // Act - Step 1: Extract package and create complog
-            var services = new ServiceCollection();
-            services.AddNuGetToCompLogServices();
-            await using var serviceProvider = services.BuildServiceProvider();
+        // Act - Step 1: Extract package and create complog
+        var services = new ServiceCollection();
+        services.AddNuGetToCompLogServices();
+        await using var serviceProvider = services.BuildServiceProvider();
             
-            var handler = serviceProvider.GetRequiredService<ProcessPackageCommandHandler>();
-            var command = new ProcessPackageCommand(packageId, version);
-            await handler.HandleAsync(command, CancellationToken.None);
+        var handler = serviceProvider.GetRequiredService<ProcessPackageCommandHandler>();
+        var command = new ProcessPackageCommand(packageId, version);
+        await handler.HandleAsync(command, CancellationToken.None);
 
-            var complogPath = Path.Combine(Directory.GetCurrentDirectory(), $"{packageId}.{version}.complog");
-            Assert.True(File.Exists(complogPath), "CompLog file should be created");
+        var complogPath = Path.Combine(Directory.GetCurrentDirectory(), $"{packageId}.{version}.complog");
+        Assert.True(File.Exists(complogPath), "CompLog file should be created");
 
-            // Get the original assembly path (stored in the extraction directory)
-            var extractionDir = Path.Combine(Directory.GetCurrentDirectory(), $"{packageId}-{version}-complog");
-            var originalAssemblyPath = Path.Combine(extractionDir, "references", $"{packageId}.dll");
-            Assert.True(File.Exists(originalAssemblyPath), $"Original assembly should exist at {originalAssemblyPath}");
+        // Get the original assembly path (stored in the extraction directory)
+        var extractionDir = Path.Combine(Directory.GetCurrentDirectory(), $"{packageId}-{version}-complog");
+        var originalAssemblyPath = Path.Combine(extractionDir, "references", $"{packageId}.dll");
+        Assert.True(File.Exists(originalAssemblyPath), $"Original assembly should exist at {originalAssemblyPath}");
 
-            // Act - Step 2: Read the complog and verify it contains complete data
-            using (var reader = CompilerLogReader.Create(complogPath, BasicAnalyzerKind.None))
-            {
-                var compilerCalls = reader.ReadAllCompilerCalls();
-                Assert.Single(compilerCalls);
-
-                var compilationData = reader.ReadCompilationData(0);
-                Assert.NotNull(compilationData);
-                Assert.Equal("Newtonsoft.Json.csproj", compilationData.CompilerCall.ProjectFileName);
-
-                // Verify sources and references are included
-                var compilation = compilationData.Compilation;
-                var sourceCount = compilation.SyntaxTrees.Count();
-                var referenceCount = compilation.References.Count();
-                
-                Assert.True(sourceCount > 200, $"Should have 200+ source files, got {sourceCount}");
-                Assert.True(referenceCount > 100, $"Should have 100+ reference assemblies, got {referenceCount}");
-
-                // Note: We cannot reliably rebuild multi-targeted packages because:
-                // - Source code is shared across TFMs with conditional compilation (#if NET6_0, etc.)
-                // - Different TFMs need different reference sets
-                // - The extracted PDB may not have all the conditional compilation symbols
-                // 
-                // The complog is valid for ANALYSIS purposes (viewing sources, references, understanding build)
-                // but not for exact binary reproduction of multi-targeted library packages.
-                //
-                // For binary reproduction, you need:
-                // - The original project file with all TFMs
-                // - The original build environment
-                // - All conditional compilation properly configured
-                
-                // Verification that the complog is complete and useful:
-                Assert.Equal("net6.0", compilationData.CompilerCall.TargetFramework);
-            }
-
-            // Assert - Compare assembly metadata (not full rebuild)
-            var comparison = CompareAssemblyMetadata(originalAssemblyPath);
-            Assert.True(comparison.HasPublicKeyToken, "Assembly should have public key token (signed)");
-            Assert.Equal("13.0.0.0", comparison.Version);
-            Assert.True(comparison.TypeCount > 400, $"Should have 400+ types, got {comparison.TypeCount}");
-        }
-        finally
+        // Act - Step 2: Read the complog and verify it contains complete data
+        using (var reader = CompilerLogReader.Create(complogPath, BasicAnalyzerKind.None))
         {
-            // Cleanup happens in test fixture
+            var compilerCalls = reader.ReadAllCompilerCalls();
+            Assert.Single(compilerCalls);
+
+            var compilationData = reader.ReadCompilationData(0);
+            Assert.NotNull(compilationData);
+            Assert.Equal("Newtonsoft.Json.csproj", compilationData.CompilerCall.ProjectFileName);
+
+            // Verify sources and references are included
+            var compilation = compilationData.Compilation;
+            var sourceCount = compilation.SyntaxTrees.Count();
+            var referenceCount = compilation.References.Count();
+                
+            Assert.True(sourceCount > 200, $"Should have 200+ source files, got {sourceCount}");
+            Assert.True(referenceCount > 100, $"Should have 100+ reference assemblies, got {referenceCount}");
+
+            // Note: We cannot reliably rebuild multi-targeted packages because:
+            // - Source code is shared across TFMs with conditional compilation (#if NET6_0, etc.)
+            // - Different TFMs need different reference sets
+            // - The extracted PDB may not have all the conditional compilation symbols
+            // 
+            // The complog is valid for ANALYSIS purposes (viewing sources, references, understanding build)
+            // but not for exact binary reproduction of multi-targeted library packages.
+            //
+            // For binary reproduction, you need:
+            // - The original project file with all TFMs
+            // - The original build environment
+            // - All conditional compilation properly configured
+                
+            // Verification that the complog is complete and useful:
+            Assert.Equal("net6.0", compilationData.CompilerCall.TargetFramework);
         }
+
+        // Assert - Compare assembly metadata (not full rebuild)
+        var comparison = CompareAssemblyMetadata(originalAssemblyPath);
+        Assert.True(comparison.HasPublicKeyToken, "Assembly should have public key token (signed)");
+        Assert.Equal("13.0.0.0", comparison.Version);
+        Assert.True(comparison.TypeCount > 400, $"Should have 400+ types, got {comparison.TypeCount}");
     }
 
     [Fact]
@@ -143,7 +135,7 @@ public class RoundTripVerificationTests
             Directory.CreateDirectory(exportDir);
             
             // Export the complog using the complog tool to verify file organization
-            var exportProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            var exportProcess = Process.Start(new ProcessStartInfo
             {
                 FileName = "complog",
                 Arguments = $"export \"{complogPath}\" -o \"{exportDir}\"",
@@ -154,7 +146,7 @@ public class RoundTripVerificationTests
             
             if (exportProcess != null)
             {
-                await exportProcess.WaitForExitAsync();
+                await exportProcess.WaitForExitAsync(TestContext.Current.CancellationToken);
                 Assert.Equal(0, exportProcess.ExitCode);
             }
             
@@ -673,27 +665,6 @@ public class RoundTripVerificationTests
         public string Error { get; set; } = "";
     }
 
-    private string? FindOriginalAssemblyInCurrentRun(string packageId)
-    {
-        // The extractor creates temp directories - search recent temp folders
-        var tempBase = Path.GetTempPath();
-        var recentDirectories = Directory.GetDirectories(tempBase, "nuget-to-complog*")
-            .Select(d => new DirectoryInfo(d))
-            .Where(d => DateTime.Now - d.CreationTime < TimeSpan.FromMinutes(5)) // Created in last 5 minutes
-            .OrderByDescending(d => d.CreationTime);
-
-        foreach (var dir in recentDirectories)
-        {
-            var dlls = Directory.GetFiles(dir.FullName, $"{packageId}.dll", SearchOption.AllDirectories);
-            if (dlls.Length > 0)
-            {
-                return dlls[0];
-            }
-        }
-
-        return null;
-    }
-
     private AssemblyMetadata CompareAssemblyMetadata(string assemblyPath)
     {
         return GetAssemblyMetadata(assemblyPath);
@@ -707,85 +678,5 @@ public class RoundTripVerificationTests
         public int TypeCount { get; set; }
         public int MethodCount { get; set; }
         public long Size { get; set; }
-    }
-
-    private AssemblyComparison CompareAssemblies(string originalPath, string rebuiltPath)
-    {
-        var comparison = new AssemblyComparison();
-
-        // Get file sizes
-        comparison.OriginalSize = new FileInfo(originalPath).Length;
-        comparison.RebuiltSize = new FileInfo(rebuiltPath).Length;
-
-        // Read metadata from both assemblies
-        using (var originalStream = File.OpenRead(originalPath))
-        using (var originalPE = new PEReader(originalStream))
-        using (var rebuiltStream = File.OpenRead(rebuiltPath))
-        using (var rebuiltPE = new PEReader(rebuiltStream))
-        {
-            var originalMetadata = originalPE.GetMetadataReader();
-            var rebuiltMetadata = rebuiltPE.GetMetadataReader();
-
-            // Compare assembly identity
-            var originalAssembly = originalMetadata.GetAssemblyDefinition();
-            var rebuiltAssembly = rebuiltMetadata.GetAssemblyDefinition();
-
-            comparison.OriginalVersion = originalAssembly.Version.ToString();
-            comparison.RebuiltVersion = rebuiltAssembly.Version.ToString();
-            comparison.SameVersion = comparison.OriginalVersion == comparison.RebuiltVersion;
-
-            // Compare public key tokens
-            var originalToken = GetPublicKeyToken(originalMetadata, originalAssembly);
-            var rebuiltToken = GetPublicKeyToken(rebuiltMetadata, rebuiltAssembly);
-            comparison.OriginalPublicKeyToken = BitConverter.ToString(originalToken).Replace("-", "");
-            comparison.RebuiltPublicKeyToken = BitConverter.ToString(rebuiltToken).Replace("-", "");
-            comparison.SamePublicKeyToken = comparison.OriginalPublicKeyToken == comparison.RebuiltPublicKeyToken;
-
-            // Compare type and method counts
-            comparison.OriginalTypeCount = originalMetadata.TypeDefinitions.Count;
-            comparison.RebuiltTypeCount = rebuiltMetadata.TypeDefinitions.Count;
-
-            comparison.OriginalMethodCount = originalMetadata.MethodDefinitions.Count;
-            comparison.RebuiltMethodCount = rebuiltMetadata.MethodDefinitions.Count;
-        }
-
-        return comparison;
-    }
-
-    private byte[] GetPublicKeyToken(MetadataReader reader, AssemblyDefinition assembly)
-    {
-        if (assembly.PublicKey.IsNil)
-        {
-            return Array.Empty<byte>();
-        }
-
-        var publicKey = reader.GetBlobBytes(assembly.PublicKey);
-        using var sha1 = SHA1.Create();
-        var hash = sha1.ComputeHash(publicKey);
-        
-        // Public key token is last 8 bytes of SHA1 hash, reversed
-        var token = new byte[8];
-        for (int i = 0; i < 8; i++)
-        {
-            token[i] = hash[hash.Length - 1 - i];
-        }
-        
-        return token;
-    }
-
-    private class AssemblyComparison
-    {
-        public long OriginalSize { get; set; }
-        public long RebuiltSize { get; set; }
-        public string OriginalVersion { get; set; } = "";
-        public string RebuiltVersion { get; set; } = "";
-        public bool SameVersion { get; set; }
-        public string OriginalPublicKeyToken { get; set; } = "";
-        public string RebuiltPublicKeyToken { get; set; } = "";
-        public bool SamePublicKeyToken { get; set; }
-        public int OriginalTypeCount { get; set; }
-        public int RebuiltTypeCount { get; set; }
-        public int OriginalMethodCount { get; set; }
-        public int RebuiltMethodCount { get; set; }
     }
 }
