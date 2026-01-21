@@ -2,7 +2,7 @@
 
 A tool to extract compilation information from NuGet packages.
 
-![NuGet to CompLog in action](./usage.gif)
+![NuGet to CompLog in action](./docs/usage.gif)
 
 ## What does it do?
 
@@ -68,8 +68,12 @@ The `.complog` file contains:
 
 You can then use the `complog` CLI tool to extract or replay the compilation.
 
-## Need more details?
+## Documentation
 
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Deep technical details about how the tool works
-- **[PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)** - Project overview
-- **[CHANGELOG.md](CHANGELOG.md)** - What's changed
+See the [docs](./docs) folder for detailed documentation:
+
+- [Architecture](docs/ARCHITECTURE.md) - Deep technical details about how the tool works
+- [Project Summary](docs/PROJECT_SUMMARY.md) - Project overview
+- [Changelog](docs/CHANGELOG.md) - What's changed
+- [Quick Start Guide](docs/guides/QUICKSTART.md) - Get started in 3 minutes
+- [Examples](docs/guides/EXAMPLES.md) - Usage examples
