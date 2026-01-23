@@ -24,5 +24,8 @@ jobs:
       - name: Build
         run: dotnet build --no-restore
 
+      - name: Install complog tool
+        run: dotnet tool install -g Basic.CompilerLog
+
       - name: Test
         run: dotnet test --no-build --verbosity normal
