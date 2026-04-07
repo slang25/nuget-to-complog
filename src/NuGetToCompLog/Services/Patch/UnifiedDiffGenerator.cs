@@ -86,11 +86,14 @@ public class UnifiedDiffGenerator
         var hunks = ComputeHunks(originalLines, modifiedLines);
         var lines = new List<string>();
 
+        // Normalize to forward slashes for git apply compatibility
+        var normalizedPath = relativePath.Replace('\\', '/');
+
         var isAddedFile = originalLines.Length == 0 && modifiedLines.Length > 0;
         var isDeletedFile = originalLines.Length > 0 && modifiedLines.Length == 0;
 
-        var originalHeader = isAddedFile ? "--- /dev/null" : $"--- a/{relativePath}";
-        var modifiedHeader = isDeletedFile ? "+++ /dev/null" : $"+++ b/{relativePath}";
+        var originalHeader = isAddedFile ? "--- /dev/null" : $"--- a/{normalizedPath}";
+        var modifiedHeader = isDeletedFile ? "+++ /dev/null" : $"+++ b/{normalizedPath}";
 
         lines.Add(originalHeader);
         lines.Add(modifiedHeader);
@@ -198,10 +201,7 @@ public class UnifiedDiffGenerator
             if (e < edits.Count - 1)
             {
                 var nextEdit = edits[e + 1];
-                var contextEnd = Math.Min(edit.OriginalStart + edit.OriginalCount + ContextLines, nextEdit.OriginalStart);
-                var contextStart2 = Math.Max(nextEdit.OriginalStart - ContextLines, edit.OriginalStart + edit.OriginalCount);
-
-                // If they overlap, just show all context
+                // Show all context lines between edits
                 for (int i = edit.OriginalStart + edit.OriginalCount; i < nextEdit.OriginalStart; i++)
                 {
                     lines.Add($" {original[i]}");
@@ -221,7 +221,9 @@ public class UnifiedDiffGenerator
         var origCount = lines.Count(l => l.StartsWith(' ') || l.StartsWith('-'));
         var modCount = lines.Count(l => l.StartsWith(' ') || l.StartsWith('+'));
 
-        var header = $"@@ -{origStart + 1},{origCount} +{modStart + 1},{modCount} @@";
+        var origHeaderStart = origCount == 0 ? 0 : origStart + 1;
+        var modHeaderStart = modCount == 0 ? 0 : modStart + 1;
+        var header = $"@@ -{origHeaderStart},{origCount} +{modHeaderStart},{modCount} @@";
 
         return new DiffHunk(header, lines);
     }

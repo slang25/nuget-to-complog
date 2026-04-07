@@ -183,14 +183,19 @@ public class AssemblyRebuilder
     private static string? FindCscDll()
     {
         var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT")
-            ?? "/usr/local/share/dotnet";
+            ?? (OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet")
+                : "/usr/local/share/dotnet");
 
         var sdkPath = Path.Combine(dotnetRoot, "sdk");
         if (!Directory.Exists(sdkPath))
             return null;
 
         var latestSdk = Directory.GetDirectories(sdkPath)
-            .OrderByDescending(d => d)
+            .Select(d => (Path: d, Version: ParseVersion(Path.GetFileName(d))))
+            .Where(x => x.Version != null)
+            .OrderByDescending(x => x.Version)
+            .Select(x => x.Path)
             .FirstOrDefault();
 
         if (latestSdk == null)
@@ -198,6 +203,14 @@ public class AssemblyRebuilder
 
         var cscPath = Path.Combine(latestSdk, "Roslyn", "bincore", "csc.dll");
         return File.Exists(cscPath) ? cscPath : null;
+    }
+
+    private static Version? ParseVersion(string name)
+    {
+        // SDK directory names like "10.0.100" or "9.0.200-preview.1"
+        var dashIndex = name.IndexOf('-');
+        var versionPart = dashIndex >= 0 ? name[..dashIndex] : name;
+        return Version.TryParse(versionPart, out var v) ? v : null;
     }
 }
 

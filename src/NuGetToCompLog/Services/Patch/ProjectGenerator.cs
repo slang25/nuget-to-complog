@@ -302,14 +302,24 @@ public class ProjectGenerator
     private async Task GenerateRebuildScriptsAsync(string patchDir, string assemblyName)
     {
         // Unix script
-        var shScript = $"""
-            #!/bin/bash
-            set -e
-            cd "$(dirname "$0")"
-            echo "Rebuilding {assemblyName}..."
-            dotnet csc @build.rsp
-            echo "Built: bin/{assemblyName}.dll"
-            """;
+        var shScript = "#!/bin/bash\n"
+            + "set -e\n"
+            + "cd \"$(dirname \"$0\")\"\n"
+            + $"echo \"Rebuilding {assemblyName}...\"\n"
+            + "\n"
+            + "# Find csc.dll from the .NET SDK\n"
+            + "DOTNET_ROOT=\"${DOTNET_ROOT:-/usr/local/share/dotnet}\"\n"
+            + "LATEST_SDK=$(ls -d \"$DOTNET_ROOT/sdk/\"*/ 2>/dev/null | sort -V | tail -1)\n"
+            + "CSC_DLL=\"${LATEST_SDK}Roslyn/bincore/csc.dll\"\n"
+            + "\n"
+            + "if [ ! -f \"$CSC_DLL\" ]; then\n"
+            + "    echo \"Error: Could not find csc.dll at $CSC_DLL\"\n"
+            + "    echo \"Set DOTNET_ROOT to your .NET SDK installation path\"\n"
+            + "    exit 1\n"
+            + "fi\n"
+            + "\n"
+            + "dotnet exec \"$CSC_DLL\" @build.rsp\n"
+            + $"echo \"Built: bin/{assemblyName}.dll\"\n";
         var shPath = Path.Combine(patchDir, "rebuild.sh");
         await File.WriteAllTextAsync(shPath, shScript);
         if (!OperatingSystem.IsWindows())
@@ -321,13 +331,27 @@ public class ProjectGenerator
         }
 
         // Windows script
-        var cmdScript = $"""
-            @echo off
-            cd /d "%~dp0"
-            echo Rebuilding {assemblyName}...
-            dotnet csc @build.rsp
-            echo Built: bin\{assemblyName}.dll
-            """;
+        var cmdScript = "@echo off\r\n"
+            + "cd /d \"%~dp0\"\r\n"
+            + $"echo Rebuilding {assemblyName}...\r\n"
+            + "\r\n"
+            + "REM Find csc.dll from the .NET SDK\r\n"
+            + "if \"%DOTNET_ROOT%\"==\"\" set \"DOTNET_ROOT=%ProgramFiles%\\dotnet\"\r\n"
+            + "for /f \"delims=\" %%d in ('dir /b /ad /o-n \"%DOTNET_ROOT%\\sdk\" 2^>nul') do (\r\n"
+            + "    set \"LATEST_SDK=%DOTNET_ROOT%\\sdk\\%%d\"\r\n"
+            + "    goto :found\r\n"
+            + ")\r\n"
+            + "echo Error: Could not find .NET SDK in %DOTNET_ROOT%\\sdk\r\n"
+            + "exit /b 1\r\n"
+            + ":found\r\n"
+            + "set \"CSC_DLL=%LATEST_SDK%\\Roslyn\\bincore\\csc.dll\"\r\n"
+            + "if not exist \"%CSC_DLL%\" (\r\n"
+            + "    echo Error: Could not find csc.dll at %CSC_DLL%\r\n"
+            + "    exit /b 1\r\n"
+            + ")\r\n"
+            + "\r\n"
+            + "dotnet exec \"%CSC_DLL%\" @build.rsp\r\n"
+            + $"echo Built: bin\\{assemblyName}.dll\r\n";
         await File.WriteAllTextAsync(Path.Combine(patchDir, "rebuild.cmd"), cmdScript);
     }
 

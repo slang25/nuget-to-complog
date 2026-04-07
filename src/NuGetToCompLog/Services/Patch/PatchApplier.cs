@@ -183,20 +183,14 @@ public class PatchApplier
         {
             var lineIndex = hunk.OriginalStart - 1 + offset; // 1-based to 0-based
 
-            // Remove original lines
             var removedCount = 0;
-            var toProcess = new List<string>(hunk.Lines);
-
-            // First pass: remove lines marked with '-' and context
             var newContent = new List<string>();
-            int origIdx = lineIndex;
 
-            foreach (var line in toProcess)
+            foreach (var line in hunk.Lines)
             {
                 if (line.StartsWith('-'))
                 {
-                    // Verify context matches (skip if not - best effort)
-                    origIdx++;
+                    // Line removed from original — count but don't add to output
                     removedCount++;
                 }
                 else if (line.StartsWith('+'))
@@ -206,14 +200,12 @@ public class PatchApplier
                 else if (line.StartsWith(' '))
                 {
                     newContent.Add(line[1..]);
-                    origIdx++;
                     removedCount++;
                 }
                 else
                 {
-                    // No prefix - treat as context
+                    // No prefix — treat as context
                     newContent.Add(line);
-                    origIdx++;
                     removedCount++;
                 }
             }
