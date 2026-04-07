@@ -18,8 +18,17 @@ public class PatchApplier
         {
             try
             {
-                ApplyFilePatch(filePatch, sourceDir, outputDir);
-                result.AppliedFiles.Add(filePatch.Path);
+                if (filePatch.IsDelete)
+                {
+                    // Deleted files: don't create output, track for exclusion from copy
+                    result.DeletedFiles.Add(filePatch.OriginalPath);
+                    result.AppliedFiles.Add(filePatch.OriginalPath);
+                }
+                else
+                {
+                    ApplyFilePatch(filePatch, sourceDir, outputDir);
+                    result.AppliedFiles.Add(filePatch.Path);
+                }
             }
             catch (Exception ex)
             {
@@ -33,16 +42,25 @@ public class PatchApplier
     private List<FilePatch> ParsePatch(string patchContent)
     {
         var patches = new List<FilePatch>();
-        var lines = patchContent.Split('\n');
+        // Normalize CRLF to LF before splitting
+        var lines = patchContent.Replace("\r\n", "\n").Split('\n');
         int i = 0;
 
         while (i < lines.Length)
         {
             // Look for file headers
-            if (i < lines.Length - 1 && lines[i].StartsWith("--- a/") && lines[i + 1].StartsWith("+++ b/"))
+            if (i < lines.Length - 1 && lines[i].StartsWith("--- ") && lines[i + 1].StartsWith("+++ "))
             {
-                var originalPath = lines[i][6..];
-                var modifiedPath = lines[i + 1][6..];
+                var originalHeader = lines[i][4..];
+                var modifiedHeader = lines[i + 1][4..];
+
+                // Parse paths, handling /dev/null for adds/deletes
+                var isAdd = originalHeader == "/dev/null";
+                var isDelete = modifiedHeader == "/dev/null";
+
+                var originalPath = isAdd ? "" : (originalHeader.StartsWith("a/") ? originalHeader[2..] : originalHeader);
+                var modifiedPath = isDelete ? "" : (modifiedHeader.StartsWith("b/") ? modifiedHeader[2..] : modifiedHeader);
+
                 i += 2;
 
                 var hunks = new List<PatchHunk>();
@@ -57,7 +75,11 @@ public class PatchApplier
                     }
                 }
 
-                patches.Add(new FilePatch(modifiedPath, originalPath, hunks));
+                patches.Add(new FilePatch(
+                    isDelete ? originalPath : modifiedPath,
+                    isAdd ? modifiedPath : originalPath,
+                    hunks,
+                    isDelete));
             }
             else
             {
@@ -93,7 +115,7 @@ public class PatchApplier
         i++; // skip header line
 
         var hunkLines = new List<string>();
-        while (i < lines.Length && !lines[i].StartsWith("@@") && !lines[i].StartsWith("--- a/"))
+        while (i < lines.Length && !lines[i].StartsWith("@@") && !lines[i].StartsWith("--- "))
         {
             hunkLines.Add(lines[i]);
             i++;
@@ -110,8 +132,27 @@ public class PatchApplier
         return (start, count);
     }
 
+    private static void ValidatePatchPath(string patchPath, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(patchPath))
+            throw new InvalidOperationException($"{parameterName} is empty.");
+
+        if (Path.IsPathRooted(patchPath))
+            throw new InvalidOperationException($"{parameterName} must be a relative path.");
+
+        var segments = patchPath.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Any(segment => segment == ".."))
+            throw new InvalidOperationException($"{parameterName} must not contain path traversal.");
+    }
+
     private void ApplyFilePatch(FilePatch filePatch, string sourceDir, string outputDir)
     {
+        ValidatePatchPath(filePatch.Path, nameof(filePatch.Path));
+        if (!string.IsNullOrEmpty(filePatch.OriginalPath))
+        {
+            ValidatePatchPath(filePatch.OriginalPath, nameof(filePatch.OriginalPath));
+        }
+
         var sourcePath = Path.Combine(sourceDir, filePatch.OriginalPath);
         var outputPath = Path.Combine(outputDir, filePatch.Path);
 
@@ -193,13 +234,14 @@ public class PatchApplier
         File.WriteAllLines(outputPath, originalLines);
     }
 
-    private record FilePatch(string Path, string OriginalPath, List<PatchHunk> Hunks);
+    private record FilePatch(string Path, string OriginalPath, List<PatchHunk> Hunks, bool IsDelete);
     private record PatchHunk(int OriginalStart, int OriginalCount, int ModifiedStart, int ModifiedCount, List<string> Lines);
 }
 
 public class PatchApplicationResult
 {
     public List<string> AppliedFiles { get; } = [];
+    public List<string> DeletedFiles { get; } = [];
     public List<(string File, string Error)> FailedFiles { get; } = [];
     public bool Success => FailedFiles.Count == 0;
 }

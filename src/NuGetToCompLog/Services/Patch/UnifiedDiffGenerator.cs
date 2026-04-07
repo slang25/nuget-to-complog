@@ -86,8 +86,14 @@ public class UnifiedDiffGenerator
         var hunks = ComputeHunks(originalLines, modifiedLines);
         var lines = new List<string>();
 
-        lines.Add($"--- a/{relativePath}");
-        lines.Add($"+++ b/{relativePath}");
+        var isAddedFile = originalLines.Length == 0 && modifiedLines.Length > 0;
+        var isDeletedFile = originalLines.Length > 0 && modifiedLines.Length == 0;
+
+        var originalHeader = isAddedFile ? "--- /dev/null" : $"--- a/{relativePath}";
+        var modifiedHeader = isDeletedFile ? "+++ /dev/null" : $"+++ b/{relativePath}";
+
+        lines.Add(originalHeader);
+        lines.Add(modifiedHeader);
 
         foreach (var hunk in hunks)
         {
@@ -146,16 +152,22 @@ public class UnifiedDiffGenerator
         return hunks;
     }
 
-    private DiffHunk BuildHunk(string[] original, string[] modified, List<Edit> edits)
+    private static DiffHunk BuildHunk(string[] original, string[] modified, List<Edit> edits)
     {
         var firstEdit = edits[0];
         var lastEdit = edits[^1];
 
-        var contextBefore = Math.Min(ContextLines, firstEdit.OriginalStart);
-        var contextAfter = Math.Min(ContextLines, original.Length - (lastEdit.OriginalStart + lastEdit.OriginalCount));
+        var contextBefore = Math.Min(
+            ContextLines,
+            Math.Min(firstEdit.OriginalStart, firstEdit.ModifiedStart));
+        var contextAfter = Math.Min(
+            ContextLines,
+            Math.Min(
+                original.Length - (lastEdit.OriginalStart + lastEdit.OriginalCount),
+                modified.Length - (lastEdit.ModifiedStart + lastEdit.ModifiedCount)));
 
-        var origStart = firstEdit.OriginalStart - contextBefore;
-        var modStart = firstEdit.ModifiedStart - contextBefore;
+        var origStart = Math.Max(0, firstEdit.OriginalStart - contextBefore);
+        var modStart = Math.Max(0, firstEdit.ModifiedStart - contextBefore);
 
         var lines = new List<string>();
 

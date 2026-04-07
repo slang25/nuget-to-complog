@@ -107,17 +107,12 @@ public class AssemblyRebuilder
     {
         var lines = await File.ReadAllLinesAsync(originalRsp);
         var newLines = new List<string>();
-        var srcPrefix = "src/";
 
         foreach (var line in lines)
         {
-            // Rewrite source file paths
-            if (line.StartsWith(srcPrefix) && !line.StartsWith("/"))
+            if (TryRewriteSourcePath(line, patchDir, patchedSourceDir, out var rewritten))
             {
-                var relativePath = line[srcPrefix.Length..];
-                var newPath = Path.Combine(patchedSourceDir, relativePath);
-                var relativeToDir = Path.GetRelativePath(patchDir, newPath);
-                newLines.Add(relativeToDir);
+                newLines.Add(rewritten);
             }
             else
             {
@@ -126,6 +121,35 @@ public class AssemblyRebuilder
         }
 
         await File.WriteAllLinesAsync(newRsp, newLines);
+    }
+
+    private static bool TryRewriteSourcePath(string line, string patchDir, string patchedSourceDir, out string rewrittenLine)
+    {
+        rewrittenLine = line;
+
+        var trimmed = line.Trim();
+        if (trimmed.StartsWith('/') || trimmed.StartsWith('#') || string.IsNullOrEmpty(trimmed))
+            return false;
+
+        // Handle optional quotes around paths
+        var wasQuoted = trimmed.Length >= 2
+            && trimmed.StartsWith('"')
+            && trimmed.EndsWith('"');
+        var pathValue = wasQuoted ? trimmed[1..^1] : trimmed;
+
+        // Match both src/ and src\ (Windows)
+        if (!pathValue.StartsWith("src/", StringComparison.Ordinal) &&
+            !pathValue.StartsWith("src\\", StringComparison.Ordinal))
+            return false;
+
+        var relativePath = pathValue[4..]
+            .Replace('\\', Path.DirectorySeparatorChar)
+            .Replace('/', Path.DirectorySeparatorChar);
+
+        var newPath = Path.Combine(patchedSourceDir, relativePath);
+        var relativeToDir = Path.GetRelativePath(patchDir, newPath);
+        rewrittenLine = wasQuoted ? $"\"{relativeToDir}\"" : relativeToDir;
+        return true;
     }
 
     private static string? FindDotnet()

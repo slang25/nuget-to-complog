@@ -194,7 +194,6 @@ public class PackageAnalysisPipeline
     {
         var hasEmbeddedPdb = _pdbDiscovery.HasEmbeddedPdb(assemblyPath);
         var hasReproducibleMarker = _pdbDiscovery.HasReproducibleMarker(assemblyPath);
-        System.Reflection.Metadata.MetadataReader? pdbMetadataReader = null;
 
         if (hasEmbeddedPdb)
         {
@@ -205,8 +204,8 @@ public class PackageAnalysisPipeline
             }
 
             var metadata = await _pdbReader.ExtractMetadataAsync(assemblyPath, null, hasReproducibleMarker, cancellationToken);
-            pdbMetadataReader = GetPdbMetadataReader(assemblyPath, null);
-            await SaveMetadataAsync(metadata, assemblyPath, pdbMetadataReader, workingDirectory);
+            using var pdbHandle = GetPdbMetadataReader(assemblyPath, null);
+            await SaveMetadataAsync(metadata, assemblyPath, pdbHandle?.Reader, workingDirectory);
             return;
         }
 
@@ -215,8 +214,8 @@ public class PackageAnalysisPipeline
         {
             _console.MarkupLine($"  [green]\u2713 Found external PDB:[/] [cyan]{Path.GetFileName(pdbPath)}[/]");
             var metadata = await _pdbReader.ExtractMetadataAsync(assemblyPath, pdbPath, hasReproducibleMarker, cancellationToken);
-            pdbMetadataReader = GetPdbMetadataReader(assemblyPath, pdbPath);
-            await SaveMetadataAsync(metadata, assemblyPath, pdbMetadataReader, workingDirectory);
+            using var pdbHandle = GetPdbMetadataReader(assemblyPath, pdbPath);
+            await SaveMetadataAsync(metadata, assemblyPath, pdbHandle?.Reader, workingDirectory);
         }
         else
         {
@@ -228,7 +227,21 @@ public class PackageAnalysisPipeline
         }
     }
 
-    private System.Reflection.Metadata.MetadataReader? GetPdbMetadataReader(string assemblyPath, string? pdbPath)
+    private sealed class PdbReaderHandle : IDisposable
+    {
+        private readonly System.Reflection.Metadata.MetadataReaderProvider _provider;
+        public System.Reflection.Metadata.MetadataReader Reader { get; }
+
+        public PdbReaderHandle(System.Reflection.Metadata.MetadataReaderProvider provider)
+        {
+            _provider = provider;
+            Reader = provider.GetMetadataReader();
+        }
+
+        public void Dispose() => _provider.Dispose();
+    }
+
+    private PdbReaderHandle? GetPdbMetadataReader(string assemblyPath, string? pdbPath)
     {
         try
         {
@@ -256,15 +269,15 @@ public class PackageAnalysisPipeline
                 }
 
                 var immutableBytes = System.Collections.Immutable.ImmutableArray.Create(pdbBytes);
-                var metadataReaderProvider = System.Reflection.Metadata.MetadataReaderProvider.FromPortablePdbImage(immutableBytes);
-                return metadataReaderProvider.GetMetadataReader();
+                var provider = System.Reflection.Metadata.MetadataReaderProvider.FromPortablePdbImage(immutableBytes);
+                return new PdbReaderHandle(provider);
             }
             else
             {
                 var pdbBytes = File.ReadAllBytes(pdbPath);
                 var immutableBytes = System.Collections.Immutable.ImmutableArray.Create(pdbBytes);
-                var metadataReaderProvider = System.Reflection.Metadata.MetadataReaderProvider.FromPortablePdbImage(immutableBytes);
-                return metadataReaderProvider.GetMetadataReader();
+                var provider = System.Reflection.Metadata.MetadataReaderProvider.FromPortablePdbImage(immutableBytes);
+                return new PdbReaderHandle(provider);
             }
         }
         catch

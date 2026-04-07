@@ -12,12 +12,10 @@ namespace NuGetToCompLog.Services.Patch;
 /// </summary>
 public class ProjectGenerator
 {
-    private readonly IFileSystemService _fileSystem;
     private readonly IConsoleWriter _console;
 
-    public ProjectGenerator(IFileSystemService fileSystem, IConsoleWriter console)
+    public ProjectGenerator(IConsoleWriter console)
     {
-        _fileSystem = fileSystem;
         _console = console;
     }
 
@@ -129,6 +127,7 @@ public class ProjectGenerator
 
         var refLines = await File.ReadAllLinesAsync(extraction.MetadataRefsFile);
         var metadataReferences = refLines
+            .Where(line => !string.IsNullOrWhiteSpace(line))
             .Select(line => new MetadataReference(
                 FileName: line,
                 ExternAliases: [],
@@ -169,15 +168,12 @@ public class ProjectGenerator
         if (extraction.CompilerArgsFile != null)
         {
             var compilerArgs = await File.ReadAllLinesAsync(extraction.CompilerArgsFile);
-            var argsDict = ParseCompilerArgumentsFile(compilerArgs);
+            var (argsDict, extraArgs) = ParseCompilerArgumentsFile(compilerArgs);
 
-            // Compiler flags
-            if (argsDict.TryGetValue("__extra_args__", out var extraArgs))
+            // Compiler flags (preserved as-is to avoid breaking quoted values)
+            foreach (var arg in extraArgs)
             {
-                foreach (var arg in extraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                {
-                    lines.Add(arg);
-                }
+                lines.Add(arg);
             }
 
             if (argsDict.TryGetValue("define", out var defines))
@@ -235,7 +231,7 @@ public class ProjectGenerator
             foreach (var kvp in argsDict)
             {
                 if (kvp.Key is "source-file-count" or "version" or "compiler-version"
-                    or "language" or "__extra_args__" or "define" or "optimization"
+                    or "language" or "define" or "optimization"
                     or "output-kind" or "language-version")
                     continue;
 
@@ -355,7 +351,7 @@ public class ProjectGenerator
         await File.WriteAllTextAsync(Path.Combine(patchDir, "patch-metadata.json"), json);
     }
 
-    private static Dictionary<string, string> ParseCompilerArgumentsFile(string[] lines)
+    private static (Dictionary<string, string> Args, List<string> ExtraArgs) ParseCompilerArgumentsFile(string[] lines)
     {
         var dict = new Dictionary<string, string>();
         var extraArgs = new List<string>();
@@ -375,11 +371,6 @@ public class ProjectGenerator
             }
         }
 
-        if (extraArgs.Count > 0)
-        {
-            dict["__extra_args__"] = string.Join(" ", extraArgs);
-        }
-
-        return dict;
+        return (dict, extraArgs);
     }
 }

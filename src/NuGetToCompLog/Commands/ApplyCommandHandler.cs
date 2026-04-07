@@ -175,7 +175,8 @@ public class ApplyCommandHandler
             _console.MarkupLine($"  [green]\u2713[/] Patch applied to {applyResult.AppliedFiles.Count} file(s)");
 
             // Copy unmodified files from .original/ to .patched/ so we have a complete source tree
-            CopyUnpatchedFiles(originalDir, patchedDir);
+            // (excluding files that the patch explicitly deletes)
+            CopyUnpatchedFiles(originalDir, patchedDir, applyResult.DeletedFiles);
 
             // Rebuild with patched sources
             var rebuildResult = await _rebuilder.RebuildAsync(patchDir, patchedDir, cancellationToken);
@@ -202,14 +203,21 @@ public class ApplyCommandHandler
         return allSuccess;
     }
 
-    private void CopyUnpatchedFiles(string originalDir, string patchedDir)
+    private void CopyUnpatchedFiles(string originalDir, string patchedDir, List<string> deletedFiles)
     {
         if (!Directory.Exists(originalDir))
             return;
 
+        var deletedSet = new HashSet<string>(deletedFiles, StringComparer.OrdinalIgnoreCase);
+
         foreach (var file in Directory.GetFiles(originalDir, "*", SearchOption.AllDirectories))
         {
             var relativePath = Path.GetRelativePath(originalDir, file);
+
+            // Skip files that were explicitly deleted by the patch
+            if (deletedSet.Contains(relativePath))
+                continue;
+
             var destPath = Path.Combine(patchedDir, relativePath);
 
             if (!File.Exists(destPath))

@@ -14,7 +14,7 @@ This is inspired by [patch-package](https://github.com/ds300/patch-package) from
 
 ## Prerequisites
 
-- .NET SDK 6.0 or later
+- .NET 10 SDK or later
 - The target NuGet package must ship with portable PDBs (embedded or via a `.snupkg` symbols package) that contain SourceLink information. Most modern, open-source NuGet packages meet this requirement.
 
 ## Workflow
