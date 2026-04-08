@@ -4,8 +4,10 @@ using NuGetToCompLog.Commands;
 using NuGetToCompLog.Infrastructure.Console;
 using NuGetToCompLog.Infrastructure.FileSystem;
 using NuGetToCompLog.Infrastructure.SourceDownload;
+using NuGetToCompLog.Services;
 using NuGetToCompLog.Services.CompLog;
 using NuGetToCompLog.Services.NuGet;
+using NuGetToCompLog.Services.Patch;
 using NuGetToCompLog.Services.Pdb;
 using NuGetToCompLog.Services.References;
 
@@ -67,8 +69,19 @@ public static class ServiceCollectionExtensions
         // CompLog services
         services.AddSingleton<CompLogStructureCreator>();
 
-        // Command handler
+        // Patch services
+        services.AddSingleton<ProjectGenerator>();
+        services.AddSingleton<PatchManager>();
+        services.AddSingleton<UnifiedDiffGenerator>();
+        services.AddSingleton<PatchApplier>();
+        services.AddSingleton<AssemblyRebuilder>();
+
+        // Pipeline and command handlers
+        services.AddSingleton<PackageAnalysisPipeline>();
         services.AddSingleton<ProcessPackageCommandHandler>();
+        services.AddSingleton<EjectPackageCommandHandler>();
+        services.AddSingleton<DiffCommandHandler>();
+        services.AddSingleton<ApplyCommandHandler>();
 
         return services;
     }
