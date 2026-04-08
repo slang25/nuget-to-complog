@@ -25,6 +25,7 @@ public class DiffCommandHandler
     public async Task<string?> HandleAsync(
         string packageId,
         string? version = null,
+        string? patchesDir = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -34,7 +35,7 @@ public class DiffCommandHandler
                 $"[cyan]{packageId}[/] {(version != null ? $"[yellow]{version}[/]" : "")}",
                 "Yellow");
 
-            var patchDir = _patchManager.FindPatchDirectory(packageId, version);
+            var patchDir = _patchManager.FindPatchDirectory(packageId, version, patchesDir);
             if (patchDir == null)
             {
                 _console.MarkupLine($"[red]\u2717[/] No ejected package found for [cyan]{packageId}[/]");

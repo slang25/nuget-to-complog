@@ -64,15 +64,17 @@ public class NuGetCommands
     /// </summary>
     /// <param name="packageId">The NuGet package identifier</param>
     /// <param name="version">The package version (auto-detected if only one version is ejected)</param>
+    /// <param name="patchesDir">Base directory for patches. Defaults to ./patches/</param>
     [Command("diff")]
     public async Task Diff(
         [Argument] string packageId,
-        [Argument] string? version = null)
+        [Argument] string? version = null,
+        string? patchesDir = null)
     {
         _console.SetIndeterminateProgress();
         try
         {
-            var result = await _diffHandler.HandleAsync(packageId, version);
+            var result = await _diffHandler.HandleAsync(packageId, version, patchesDir);
 
             if (result == null)
             {
@@ -90,14 +92,16 @@ public class NuGetCommands
     /// Apply patches and rebuild assemblies.
     /// </summary>
     /// <param name="packageId">Optional: apply only patches for this package</param>
+    /// <param name="patchesDir">Base directory for patches. Defaults to ./patches/</param>
     [Command("apply")]
     public async Task Apply(
-        [Argument] string? packageId = null)
+        [Argument] string? packageId = null,
+        string? patchesDir = null)
     {
         _console.SetIndeterminateProgress();
         try
         {
-            var result = await _applyHandler.HandleAsync(packageId);
+            var result = await _applyHandler.HandleAsync(packageId, patchesDir);
 
             if (!result)
             {

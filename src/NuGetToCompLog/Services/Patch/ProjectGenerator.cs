@@ -2,8 +2,6 @@ using System.Text.Json;
 using NuGetToCompLog.Abstractions;
 using NuGetToCompLog.Domain;
 using NuGetToCompLog.Services;
-using Microsoft.CodeAnalysis;
-
 namespace NuGetToCompLog.Services.Patch;
 
 /// <summary>

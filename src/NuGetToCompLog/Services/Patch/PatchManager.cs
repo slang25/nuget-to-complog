@@ -29,12 +29,14 @@ public class PatchManager
 
         if (version != null)
         {
-            var exactDir = Path.Combine(baseDir, $"{packageId}+{version}");
-            return Directory.Exists(exactDir) ? exactDir : null;
+            var expectedDirectoryName = $"{packageId}+{version}";
+            var patchDirectories = Directory.GetDirectories(baseDir);
+            return patchDirectories.FirstOrDefault(d =>
+                string.Equals(Path.GetFileName(d), expectedDirectoryName, StringComparison.OrdinalIgnoreCase));
         }
 
-        // Find all directories matching this package ID
-        var matches = Directory.GetDirectories(baseDir, $"{packageId}+*")
+        // Find all directories matching this package ID (case-insensitive for cross-platform compat)
+        var matches = Directory.GetDirectories(baseDir)
             .Where(d => Path.GetFileName(d).StartsWith($"{packageId}+", StringComparison.OrdinalIgnoreCase))
             .ToList();
 

@@ -79,6 +79,7 @@ public class PatchApplier
                     isDelete ? originalPath : modifiedPath,
                     isAdd ? modifiedPath : originalPath,
                     hunks,
+                    isAdd,
                     isDelete));
             }
             else
@@ -161,6 +162,12 @@ public class PatchApplier
         // Handle new files (no original)
         if (!File.Exists(sourcePath))
         {
+            if (!filePatch.IsAdd)
+            {
+                throw new InvalidOperationException(
+                    $"Source file not found: {filePatch.OriginalPath} (patch is a modification, not an add)");
+            }
+
             var newLines = new List<string>();
             foreach (var hunk in filePatch.Hunks)
             {
@@ -185,12 +192,24 @@ public class PatchApplier
 
             var removedCount = 0;
             var newContent = new List<string>();
+            var verifyIndex = lineIndex;
 
             foreach (var line in hunk.Lines)
             {
                 if (line.StartsWith('-'))
                 {
-                    // Line removed from original — count but don't add to output
+                    // Verify removed line matches source
+                    if (verifyIndex < originalLines.Count)
+                    {
+                        var expected = line[1..];
+                        if (originalLines[verifyIndex] != expected)
+                        {
+                            throw new InvalidOperationException(
+                                $"Patch conflict in {filePatch.Path} at line {verifyIndex + 1}: " +
+                                $"expected '{expected}' but found '{originalLines[verifyIndex]}'");
+                        }
+                    }
+                    verifyIndex++;
                     removedCount++;
                 }
                 else if (line.StartsWith('+'))
@@ -199,13 +218,26 @@ public class PatchApplier
                 }
                 else if (line.StartsWith(' '))
                 {
+                    // Verify context line matches source
+                    if (verifyIndex < originalLines.Count)
+                    {
+                        var expected = line[1..];
+                        if (originalLines[verifyIndex] != expected)
+                        {
+                            throw new InvalidOperationException(
+                                $"Patch context mismatch in {filePatch.Path} at line {verifyIndex + 1}: " +
+                                $"expected '{expected}' but found '{originalLines[verifyIndex]}'");
+                        }
+                    }
                     newContent.Add(line[1..]);
+                    verifyIndex++;
                     removedCount++;
                 }
                 else
                 {
                     // No prefix — treat as context
                     newContent.Add(line);
+                    verifyIndex++;
                     removedCount++;
                 }
             }
@@ -226,7 +258,7 @@ public class PatchApplier
         File.WriteAllLines(outputPath, originalLines);
     }
 
-    private record FilePatch(string Path, string OriginalPath, List<PatchHunk> Hunks, bool IsDelete);
+    private record FilePatch(string Path, string OriginalPath, List<PatchHunk> Hunks, bool IsAdd, bool IsDelete);
     private record PatchHunk(int OriginalStart, int OriginalCount, int ModifiedStart, int ModifiedCount, List<string> Lines);
 }
 

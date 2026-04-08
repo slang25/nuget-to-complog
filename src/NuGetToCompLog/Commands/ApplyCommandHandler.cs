@@ -27,6 +27,7 @@ public class ApplyCommandHandler
 
     public async Task<bool> HandleAsync(
         string? packageId = null,
+        string? patchesDir = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -39,7 +40,7 @@ public class ApplyCommandHandler
                 "Cyan1");
 
             // Find patch files to apply
-            var patchFiles = _patchManager.ListPatchFiles();
+            var patchFiles = _patchManager.ListPatchFiles(patchesDir);
             if (packageId != null)
             {
                 patchFiles = patchFiles
@@ -50,7 +51,7 @@ public class ApplyCommandHandler
             if (patchFiles.Count == 0)
             {
                 // No .patch files - check if there are ejected packages with modifications
-                var ejectedDirs = _patchManager.ListEjectedPackages();
+                var ejectedDirs = _patchManager.ListEjectedPackages(patchesDir);
                 if (packageId != null)
                 {
                     ejectedDirs = ejectedDirs

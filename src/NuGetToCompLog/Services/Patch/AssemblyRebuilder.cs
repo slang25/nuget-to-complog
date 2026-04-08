@@ -41,12 +41,8 @@ public class AssemblyRebuilder
         var binDir = Path.Combine(patchDir, "bin");
         Directory.CreateDirectory(binDir);
 
-        // Find dotnet executable
+        // Find dotnet executable or command name to launch
         var dotnetPath = FindDotnet();
-        if (dotnetPath == null)
-        {
-            return new RebuildResult(false, "Could not find 'dotnet' on PATH", null);
-        }
 
         // Find csc.dll
         var cscPath = FindCscDll();
@@ -152,28 +148,33 @@ public class AssemblyRebuilder
         return true;
     }
 
-    private static string? FindDotnet()
+    private static string FindDotnet()
     {
+        var exeName = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
+
         var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
         if (dotnetRoot != null)
         {
-            var dotnetExe = Path.Combine(dotnetRoot, "dotnet");
+            var dotnetExe = Path.Combine(dotnetRoot, exeName);
             if (File.Exists(dotnetExe))
                 return dotnetExe;
         }
 
         // Try common locations
-        var candidates = new[]
+        if (!OperatingSystem.IsWindows())
         {
-            "/usr/local/share/dotnet/dotnet",
-            "/usr/share/dotnet/dotnet",
-            "/opt/homebrew/bin/dotnet"
-        };
+            var candidates = new[]
+            {
+                "/usr/local/share/dotnet/dotnet",
+                "/usr/share/dotnet/dotnet",
+                "/opt/homebrew/bin/dotnet"
+            };
 
-        foreach (var candidate in candidates)
-        {
-            if (File.Exists(candidate))
-                return candidate;
+            foreach (var candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                    return candidate;
+            }
         }
 
         // Fall back to PATH

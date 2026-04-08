@@ -15,7 +15,7 @@ public class UnifiedDiffGenerator
     public DiffResult GenerateDiff(string originalDir, string modifiedDir)
     {
         var result = new DiffResult();
-        var allFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var allFiles = new HashSet<string>(StringComparer.Ordinal);
 
         // Collect all relative paths from both directories
         if (Directory.Exists(originalDir))
@@ -34,7 +34,7 @@ public class UnifiedDiffGenerator
             }
         }
 
-        foreach (var relativePath in allFiles.OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+        foreach (var relativePath in allFiles.OrderBy(f => f, StringComparer.Ordinal))
         {
             var originalFile = Path.Combine(originalDir, relativePath);
             var modifiedFile = Path.Combine(modifiedDir, relativePath);
