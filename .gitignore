@@ -38,6 +38,7 @@ bld/
 *.snupkg
 packages/
 .nuget/
+artifacts/
 
 ## OS generated files
 .DS_Store

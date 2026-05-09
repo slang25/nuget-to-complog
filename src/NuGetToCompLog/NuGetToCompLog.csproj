@@ -5,7 +5,25 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>nuget-to-complog</ToolCommandName>
+    <PackageId>NuGetToCompLog</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Stuart Lang</Authors>
+    <Description>Extract a portable CompLog (compilation log) from a NuGet package, or eject and patch the original source. The .NET equivalent of patch-package.</Description>
+    <PackageTags>nuget;complog;compilation;pdb;sourcelink;patch-package;roslyn</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/slang25/nuget-to-complog</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageProjectUrl>https://github.com/slang25/nuget-to-complog</PackageProjectUrl>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="ConsoleAppFramework" Version="5.7.13">
