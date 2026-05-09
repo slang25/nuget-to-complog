@@ -1,0 +1,82 @@
+{
+  "skill_name": "patch-nuget-package",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Patch Newtonsoft.Json 13.0.3 so that JsonConvert.SerializeObject prepends the string \"[PATCHED] \" to every serialization result. Then create a .NET console app that references Newtonsoft.Json 13.0.3, serializes the object `new { name = \"test\" }`, and prints the result to stdout. Swap in the patched DLL and run the app. Save the console output to a file called `result.txt` in the outputs directory.",
+      "expected_output": "result.txt contains a line starting with [PATCHED] followed by the JSON",
+      "files": [],
+      "assertions": [
+        {
+          "id": "result-contains-patched-marker",
+          "text": "result.txt contains '[PATCHED]'",
+          "type": "file_contains",
+          "file": "result.txt",
+          "pattern": "\\[PATCHED\\]"
+        },
+        {
+          "id": "result-contains-json",
+          "text": "result.txt contains the serialized JSON with name:test",
+          "type": "file_contains",
+          "file": "result.txt",
+          "pattern": "\"name\":\"test\""
+        },
+        {
+          "id": "patch-file-exists",
+          "text": "A .patch file was created",
+          "type": "file_exists",
+          "file": "*.patch"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Patch Polly 8.5.0 so that whenever a retry occurs due to an exception, it writes a line to stderr in the format: `POLLY-RETRY: <exception type full name>`. Then create a .NET console app that: (1) references Polly 8.5.0, (2) sets up a retry policy that retries 2 times, (3) executes a delegate that throws an InvalidOperationException on the first two calls then succeeds on the third. Run the app and save stderr to `result.txt` in the outputs directory.",
+      "expected_output": "result.txt contains POLLY-RETRY: System.InvalidOperationException",
+      "files": [],
+      "assertions": [
+        {
+          "id": "result-contains-retry-marker",
+          "text": "result.txt contains 'POLLY-RETRY:'",
+          "type": "file_contains",
+          "file": "result.txt",
+          "pattern": "POLLY-RETRY:"
+        },
+        {
+          "id": "result-contains-exception-type",
+          "text": "result.txt contains 'InvalidOperationException'",
+          "type": "file_contains",
+          "file": "result.txt",
+          "pattern": "InvalidOperationException"
+        },
+        {
+          "id": "patch-file-exists",
+          "text": "A .patch file was created",
+          "type": "file_exists",
+          "file": "*.patch"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Patch Serilog (latest version) so that every log event automatically includes a property called `MachineName` with the value of Environment.MachineName, without requiring any enricher configuration. Then create a .NET console app that: (1) references Serilog and Serilog.Sinks.Console, (2) creates a logger with WriteTo.Console(outputTemplate: \"{Properties}\\n\"), (3) logs a single Information message \"hello\". Swap in the patched Serilog DLL and run the app. Save stdout to `result.txt` in the outputs directory.",
+      "expected_output": "result.txt contains MachineName property in the output",
+      "files": [],
+      "assertions": [
+        {
+          "id": "result-contains-machine-name-key",
+          "text": "result.txt contains 'MachineName' as a property key",
+          "type": "file_contains",
+          "file": "result.txt",
+          "pattern": "MachineName"
+        },
+        {
+          "id": "patch-file-exists",
+          "text": "A .patch file was created",
+          "type": "file_exists",
+          "file": "*.patch"
+        }
+      ]
+    }
+  ]
+}

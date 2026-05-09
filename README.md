@@ -10,11 +10,19 @@ Imagine you find an interesting NuGet package on nuget.org and want to understan
 
 **In plain English:** It's like taking a snapshot of a build. Everything that went into compiling that package gets captured in one `.complog` file that you can move around and use to replay the original compilation.
 
+## Install
+
+```bash
+dotnet tool install -g NuGetToCompLog
+```
+
+This installs the `nuget-to-complog` command globally. Upgrade with `dotnet tool update -g NuGetToCompLog`.
+
 ## Example
 
 ```bash
 # Download Newtonsoft.Json and extract its compilation info
-dotnet run -- Newtonsoft.Json 13.0.3
+nuget-to-complog Newtonsoft.Json 13.0.3
 
 # Creates: Newtonsoft.Json.13.0.3.complog
 # This file now contains all compiler settings, dependencies, and sources
@@ -31,16 +39,23 @@ dotnet run -- Newtonsoft.Json 13.0.3
 ## Quick Start
 
 ```bash
-# Clone and build
-git clone https://github.com/username/nuget-to-complog.git
-cd nuget-to-complog
-dotnet build
+# Install
+dotnet tool install -g NuGetToCompLog
 
 # Extract a package's compilation info
-dotnet run -- Newtonsoft.Json 13.0.3
+nuget-to-complog Newtonsoft.Json 13.0.3
 ```
 
 This creates a `.complog` file in your current directory with all the compilation details.
+
+### Building from source
+
+```bash
+git clone https://github.com/slang25/nuget-to-complog.git
+cd nuget-to-complog
+dotnet build
+dotnet run --project src/NuGetToCompLog -- Newtonsoft.Json 13.0.3
+```
 
 ## How it works
 
