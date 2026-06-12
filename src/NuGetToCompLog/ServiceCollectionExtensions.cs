@@ -47,6 +47,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<CompilationOptionsExtractor>();
         services.AddSingleton<IPdbReader, PdbReaderService>();
         services.AddSingleton<SourceLinkParser>();
+        services.AddSingleton<SymbolServerClient>();
 
         // Reference resolution services
         // Note: ReferenceResolverService needs workingDirectory, so we register a factory

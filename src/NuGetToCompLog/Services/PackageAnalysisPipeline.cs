@@ -18,6 +18,7 @@ public class PackageAnalysisPipeline
     private readonly ITargetFrameworkSelector _tfmSelector;
     private readonly PdbDiscoveryService _pdbDiscovery;
     private readonly IPdbReader _pdbReader;
+    private readonly SymbolServerClient _symbolServerClient;
     private readonly ISourceFileDownloader _sourceDownloader;
     private readonly IFileSystemService _fileSystem;
     private readonly IConsoleWriter _console;
@@ -28,6 +29,7 @@ public class PackageAnalysisPipeline
         ITargetFrameworkSelector tfmSelector,
         PdbDiscoveryService pdbDiscovery,
         IPdbReader pdbReader,
+        SymbolServerClient symbolServerClient,
         ISourceFileDownloader sourceDownloader,
         IFileSystemService fileSystem,
         IConsoleWriter console)
@@ -37,6 +39,7 @@ public class PackageAnalysisPipeline
         _tfmSelector = tfmSelector;
         _pdbDiscovery = pdbDiscovery;
         _pdbReader = pdbReader;
+        _symbolServerClient = symbolServerClient;
         _sourceDownloader = sourceDownloader;
         _fileSystem = fileSystem;
         _console = console;
@@ -210,6 +213,20 @@ public class PackageAnalysisPipeline
         }
 
         var pdbPath = await _pdbReader.FindPdbAsync(assemblyPath, workingDirectory);
+
+        if (pdbPath == null)
+        {
+            // Last resort: query public symbol servers (SSQP). Recovers Microsoft.* /
+            // System.* / Azure.* packages that ship symbols to a symbol server instead
+            // of a .snupkg on nuget.org. The PDB lands next to the assembly, so we
+            // re-run discovery to locate it through the normal path.
+            var symbolServerPdb = await _symbolServerClient.TryDownloadPdbAsync(assemblyPath, cancellationToken);
+            if (symbolServerPdb != null)
+            {
+                pdbPath = await _pdbReader.FindPdbAsync(assemblyPath, workingDirectory);
+            }
+        }
+
         if (pdbPath != null)
         {
             _console.MarkupLine($"  [green]\u2713 Found external PDB:[/] [cyan]{Path.GetFileName(pdbPath)}[/]");
