@@ -126,15 +126,25 @@ public class PdbReaderService : IPdbReader
 
     private string? ExtractSourceLink(MetadataReader metadataReader)
     {
-        var sourceLinkHandle = metadataReader.GetCustomDebugInformation(EntityHandle.ModuleDefinition)
-            .Select(h => metadataReader.GetCustomDebugInformation(h))
-            .FirstOrDefault(cdi => metadataReader.GetGuid(cdi.Kind).ToString()
-                .Equals(CompilationOptionsExtractor.SourceLinkGuid, StringComparison.OrdinalIgnoreCase));
-
-        if (sourceLinkHandle.Kind != default)
+        // Iterate the handles directly rather than using FirstOrDefault on the
+        // projected struct: FirstOrDefault returns default(CustomDebugInformation)
+        // when no Source Link CDI is present (e.g. MassTransit's embedded PDB), and
+        // reading .Kind/.Value on that default value dereferences a null internal
+        // MetadataReader, throwing a NullReferenceException.
+        foreach (var cdiHandle in metadataReader.GetCustomDebugInformation(EntityHandle.ModuleDefinition))
         {
-            var blob = metadataReader.GetBlobBytes(sourceLinkHandle.Value);
-            return System.Text.Encoding.UTF8.GetString(blob);
+            var cdi = metadataReader.GetCustomDebugInformation(cdiHandle);
+            if (cdi.Kind.IsNil)
+            {
+                continue;
+            }
+
+            var guid = metadataReader.GetGuid(cdi.Kind);
+            if (guid.ToString().Equals(CompilationOptionsExtractor.SourceLinkGuid, StringComparison.OrdinalIgnoreCase))
+            {
+                var blob = metadataReader.GetBlobBytes(cdi.Value);
+                return System.Text.Encoding.UTF8.GetString(blob);
+            }
         }
 
         return null;
