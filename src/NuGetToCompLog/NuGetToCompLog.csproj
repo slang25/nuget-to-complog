@@ -9,7 +9,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>nuget-to-complog</ToolCommandName>
     <PackageId>NuGetToCompLog</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>Stuart Lang</Authors>
     <Description>Extract a portable CompLog (compilation log) from a NuGet package, or eject and patch the original source. The .NET equivalent of patch-package.</Description>
     <PackageTags>nuget;complog;compilation;pdb;sourcelink;patch-package;roslyn</PackageTags>
@@ -37,6 +37,10 @@
     <PackageReference Include="System.Reflection.Metadata" Version="10.0.9" />
     <PackageReference Include="System.Text.Json" Version="10.0.9" />
     <PackageReference Include="Basic.CompilerLog.Util" Version="0.9.41" />
+    <!-- Direct reference to override the vulnerable MessagePack 3.1.4 pulled in transitively by
+         Basic.CompilerLog.Util. Fixes GHSA-hv8m-jj95-wg3x (patched in 3.1.7). Remove once the
+         upstream package bumps its MessagePack dependency past 3.1.7. -->
+    <PackageReference Include="MessagePack" Version="3.1.7" />
     <PackageReference Include="IgnoresAccessChecksToGenerator" Version="0.8.0" PrivateAssets="All" />
     <PackageReference Include="ICSharpCode.Decompiler" Version="10.1.0.8386" />
   </ItemGroup>
