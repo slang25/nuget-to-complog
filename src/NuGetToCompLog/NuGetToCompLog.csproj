@@ -9,7 +9,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>nuget-to-complog</ToolCommandName>
     <PackageId>NuGetToCompLog</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <Authors>Stuart Lang</Authors>
     <Description>Extract a portable CompLog (compilation log) from a NuGet package, or eject and patch the original source. The .NET equivalent of patch-package.</Description>
     <PackageTags>nuget;complog;compilation;pdb;sourcelink;patch-package;roslyn</PackageTags>
