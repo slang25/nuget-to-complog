@@ -1,6 +1,10 @@
+using System.Collections.Concurrent;
+using System.Net.Http;
 using System.Text.Json;
+using System.Threading.Channels;
 using NuGetToCompLog.Abstractions;
 using NuGetToCompLog.Domain;
+using NuGetToCompLog.Infrastructure.Http;
 using NuGetToCompLog.Services.Pdb;
 
 namespace NuGetToCompLog.Infrastructure.SourceDownload;
@@ -10,17 +14,27 @@ namespace NuGetToCompLog.Infrastructure.SourceDownload;
 /// </summary>
 public class HttpSourceFileDownloader : ISourceFileDownloader
 {
+    /// <summary>
+    /// Maximum number of source files fetched concurrently. SourceLink hosts (raw.githubusercontent.com
+    /// and friends) are CDN-backed and multiplex happily over HTTP/2, so a higher cap than the old
+    /// value of 5 cuts the download phase markedly without risking throttling.
+    /// </summary>
+    private const int MaxConcurrentDownloads = 16;
+
     private readonly IFileSystemService _fileSystem;
     private readonly IConsoleWriter _console;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly SourceFileDecompilerService? _decompiler;
 
     public HttpSourceFileDownloader(
-        IFileSystemService fileSystem, 
+        IFileSystemService fileSystem,
         IConsoleWriter console,
+        IHttpClientFactory httpClientFactory,
         SourceFileDecompilerService? decompiler = null)
     {
         _fileSystem = fileSystem;
         _console = console;
+        _httpClientFactory = httpClientFactory;
         _decompiler = decompiler;
     }
 
@@ -76,32 +90,62 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
 
         _console.MarkupLine("  [cyan]Downloading from Source Link URLs...[/]");
 
-        using var httpClient = new HttpClient();
-        httpClient.Timeout = TimeSpan.FromSeconds(30);
-        httpClient.DefaultRequestHeaders.Add("User-Agent", "NuGetToCompLog/1.0");
-
-        var downloadTasks = new List<Task<(bool success, string sourceFilePath)>>();
-        var semaphore = new SemaphoreSlim(5); // Limit concurrent downloads
-
+        // Resolve every file to its SourceLink URL up front; skip ones with no mapping.
+        var workItems = new List<(string Url, string LocalPath)>();
         foreach (var sourceFile in nonEmbeddedFiles)
         {
             var url = MapSourceLinkUrl(sourceFile.Path, mappings);
             if (url == null) continue;
-
-            downloadTasks.Add(DownloadSourceFileAsync(
-                httpClient,
-                semaphore,
-                url,
-                sourceFile.Path,
-                destinationDirectory,
-                cancellationToken));
+            workItems.Add((url, sourceFile.Path));
         }
 
-        var results = await Task.WhenAll(downloadTasks);
-        var successCount = results.Count(r => r.success);
+        // Bounded channel + a fixed pool of workers caps concurrency: the channel's capacity gives
+        // the producer backpressure, and the worker count is the hard ceiling on in-flight downloads.
+        var workerCount = Math.Min(MaxConcurrentDownloads, Math.Max(1, workItems.Count));
+        var channel = Channel.CreateBounded<(string Url, string LocalPath)>(
+            new BoundedChannelOptions(MaxConcurrentDownloads)
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = false,
+                SingleWriter = true,
+            });
+
+        var results = new ConcurrentBag<(bool Success, string SourceFilePath)>();
+
+        // One client for the whole batch; its handler is pooled by the factory. HttpClient is
+        // thread-safe for concurrent sends, so all workers share this instance.
+        var httpClient = _httpClientFactory.CreateClient(HttpClientNames.SourceDownload);
+
+        var workers = new Task[workerCount];
+        for (var i = 0; i < workerCount; i++)
+        {
+            workers[i] = Task.Run(async () =>
+            {
+                await foreach (var item in channel.Reader.ReadAllAsync(cancellationToken))
+                {
+                    var result = await DownloadSourceFileAsync(
+                        httpClient,
+                        item.Url,
+                        item.LocalPath,
+                        destinationDirectory,
+                        cancellationToken);
+                    results.Add(result);
+                }
+            }, cancellationToken);
+        }
+
+        foreach (var item in workItems)
+        {
+            await channel.Writer.WriteAsync(item, cancellationToken);
+        }
+        channel.Writer.Complete();
+
+        await Task.WhenAll(workers);
+
+        var successCount = results.Count(r => r.Success);
         var failedFiles = results
-            .Where(r => !r.success)
-            .Select(r => r.sourceFilePath)
+            .Where(r => !r.Success)
+            .Select(r => r.SourceFilePath)
             .ToList();
 
         if (successCount > 0)
@@ -206,16 +250,13 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
         return null;
     }
 
-    private async Task<(bool success, string sourceFilePath)> DownloadSourceFileAsync(
+    private async Task<(bool Success, string SourceFilePath)> DownloadSourceFileAsync(
         HttpClient httpClient,
-        SemaphoreSlim semaphore,
         string url,
         string localPath,
         string sourcesDir,
         CancellationToken cancellationToken)
     {
-        await semaphore.WaitAsync(cancellationToken);
-
         try
         {
             var response = await httpClient.GetAsync(url, cancellationToken);
@@ -234,10 +275,6 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
         catch
         {
             return (false, localPath);
-        }
-        finally
-        {
-            semaphore.Release();
         }
     }
 
