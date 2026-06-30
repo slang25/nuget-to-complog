@@ -1,8 +1,11 @@
+using System.Net;
+using System.Net.Http;
 using Microsoft.Extensions.DependencyInjection;
 using NuGetToCompLog.Abstractions;
 using NuGetToCompLog.Commands;
 using NuGetToCompLog.Infrastructure.Console;
 using NuGetToCompLog.Infrastructure.FileSystem;
+using NuGetToCompLog.Infrastructure.Http;
 using NuGetToCompLog.Infrastructure.SourceDownload;
 using NuGetToCompLog.Services;
 using NuGetToCompLog.Services.CompLog;
@@ -25,6 +28,35 @@ public static class ServiceCollectionExtensions
         this IServiceCollection services, 
         string? workingDirectory = null)
     {
+        // HTTP clients (IHttpClientFactory) — one named client per remote, each with its own
+        // pooled handler and config. Centralizes timeout/redirect/HTTP-version/header settings
+        // that were previously duplicated across hand-rolled `new HttpClient()` call sites.
+        services.AddHttpClient(HttpClientNames.SourceDownload, c =>
+        {
+            // SourceLink hosts are CDN-backed and multiplex over HTTP/2.
+            c.Timeout = TimeSpan.FromSeconds(30);
+            c.DefaultRequestVersion = HttpVersion.Version20;
+            c.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+            c.DefaultRequestHeaders.Add("User-Agent", "NuGetToCompLog/1.0");
+        });
+        services.AddHttpClient(HttpClientNames.SymbolPackage, c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(30);
+        }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            // The v2 symbolpackage endpoint 302-redirects to the symbol-packages CDN.
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 10
+        });
+        services.AddHttpClient(HttpClientNames.SymbolServer, c =>
+        {
+            c.Timeout = TimeSpan.FromSeconds(30);
+        }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 10
+        });
+
         // Infrastructure services
         services.AddSingleton<IFileSystemService, FileSystemService>();
         services.AddSingleton<IConsoleWriter, SpectreConsoleWriter>();
@@ -34,7 +66,8 @@ public static class ServiceCollectionExtensions
             var fileSystem = sp.GetRequiredService<IFileSystemService>();
             var console = sp.GetRequiredService<IConsoleWriter>();
             var decompiler = sp.GetRequiredService<SourceFileDecompilerService>();
-            return new HttpSourceFileDownloader(fileSystem, console, decompiler);
+            var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+            return new HttpSourceFileDownloader(fileSystem, console, httpClientFactory, decompiler);
         });
 
         // NuGet services

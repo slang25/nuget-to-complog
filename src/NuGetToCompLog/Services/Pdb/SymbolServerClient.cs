@@ -1,5 +1,7 @@
+using System.Net.Http;
 using System.Reflection.PortableExecutable;
 using NuGetToCompLog.Abstractions;
+using NuGetToCompLog.Infrastructure.Http;
 
 namespace NuGetToCompLog.Services.Pdb;
 
@@ -28,10 +30,12 @@ public class SymbolServerClient
     };
 
     private readonly IConsoleWriter _console;
+    private readonly IHttpClientFactory _httpClientFactory;
 
-    public SymbolServerClient(IConsoleWriter console)
+    public SymbolServerClient(IConsoleWriter console, IHttpClientFactory httpClientFactory)
     {
         _console = console;
+        _httpClientFactory = httpClientFactory;
     }
 
     /// <summary>
@@ -61,13 +65,7 @@ public class SymbolServerClient
 
         var destinationPath = Path.Combine(assemblyDir, pdbFileName);
 
-        using var handler = new HttpClientHandler
-        {
-            AllowAutoRedirect = true,
-            MaxAutomaticRedirections = 10
-        };
-        using var httpClient = new HttpClient(handler);
-        httpClient.Timeout = TimeSpan.FromSeconds(30);
+        var httpClient = _httpClientFactory.CreateClient(HttpClientNames.SymbolServer);
 
         foreach (var server in SymbolServers)
         {

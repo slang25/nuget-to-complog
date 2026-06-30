@@ -5,6 +5,7 @@ using NuGet.Versioning;
 using NuGetToCompLog.Abstractions;
 using NuGetToCompLog.Domain;
 using NuGetToCompLog.Exceptions;
+using NuGetToCompLog.Infrastructure.Http;
 
 namespace NuGetToCompLog.Services.NuGet;
 
@@ -13,11 +14,15 @@ namespace NuGetToCompLog.Services.NuGet;
 /// </summary>
 public class NuGetClientService : INuGetClient
 {
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly string _sourceUrl;
     private readonly ILogger _logger;
 
-    public NuGetClientService(string sourceUrl = "https://api.nuget.org/v3/index.json")
+    public NuGetClientService(
+        IHttpClientFactory httpClientFactory,
+        string sourceUrl = "https://api.nuget.org/v3/index.json")
     {
+        _httpClientFactory = httpClientFactory;
         _sourceUrl = sourceUrl;
         _logger = NullLogger.Instance;
     }
@@ -58,22 +63,21 @@ public class NuGetClientService : INuGetClient
     {
         var snupkgPath = Path.Combine(destinationPath, package.SymbolsFileName);
 
-        // Try multiple symbol package sources
+        // Try multiple symbol package sources. Order matters: snupkg packages live on the
+        // symbol-packages CDN path, NOT on flatcontainer (which 404s for .snupkg) — so lead with
+        // the direct CDN URL, which is served without a redirect. The v2 symbolpackage endpoint is
+        // kept as a fallback; it works but 302-redirects to the same CDN, costing an extra hop.
+        var idL = package.Id.ToLowerInvariant();
+        var verL = package.Version.ToLowerInvariant();
         var snupkgUrls = new[]
         {
-            $"https://api.nuget.org/v3-flatcontainer/{package.Id.ToLowerInvariant()}/{package.Version.ToLowerInvariant()}/{package.Id.ToLowerInvariant()}.{package.Version.ToLowerInvariant()}.snupkg",
-            // v2 API endpoint - this is where many packages publish their symbols
+            $"https://globalcdn.nuget.org/symbol-packages/{idL}.{verL}.snupkg",
+            // v2 API endpoint - redirects to the symbol-packages CDN; fallback in case the
+            // direct path ever changes.
             $"https://www.nuget.org/api/v2/symbolpackage/{package.Id}/{package.Version}",
-            $"https://globalcdn.nuget.org/packages/{package.Id.ToLowerInvariant()}.{package.Version.ToLowerInvariant()}.snupkg",
         };
 
-        using var handler = new HttpClientHandler
-        {
-            AllowAutoRedirect = true,
-            MaxAutomaticRedirections = 10
-        };
-        using var httpClient = new HttpClient(handler);
-        httpClient.Timeout = TimeSpan.FromSeconds(30);
+        var httpClient = _httpClientFactory.CreateClient(HttpClientNames.SymbolPackage);
 
         foreach (var snupkgUrl in snupkgUrls)
         {
