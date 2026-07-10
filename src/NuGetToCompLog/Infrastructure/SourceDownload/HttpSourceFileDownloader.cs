@@ -91,18 +91,21 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
         _console.MarkupLine("  [cyan]Downloading from Source Link URLs...[/]");
 
         // Resolve every file to its SourceLink URL up front; skip ones with no mapping.
-        var workItems = new List<(string Url, string LocalPath)>();
+        var workItems = new List<(string Url, string SourcePath, string LocalPath)>();
         foreach (var sourceFile in nonEmbeddedFiles)
         {
             var url = MapSourceLinkUrl(sourceFile.Path, mappings);
             if (url == null) continue;
-            workItems.Add((url, sourceFile.Path));
+            var localPath = sourceFile.LocalPath != null
+                ? Path.Combine(destinationDirectory, sourceFile.LocalPath)
+                : GetDestinationPath(sourceFile.Path, destinationDirectory);
+            workItems.Add((url, sourceFile.Path, localPath));
         }
 
         // Bounded channel + a fixed pool of workers caps concurrency: the channel's capacity gives
         // the producer backpressure, and the worker count is the hard ceiling on in-flight downloads.
         var workerCount = Math.Min(MaxConcurrentDownloads, Math.Max(1, workItems.Count));
-        var channel = Channel.CreateBounded<(string Url, string LocalPath)>(
+        var channel = Channel.CreateBounded<(string Url, string SourcePath, string LocalPath)>(
             new BoundedChannelOptions(MaxConcurrentDownloads)
             {
                 FullMode = BoundedChannelFullMode.Wait,
@@ -126,8 +129,8 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
                     var result = await DownloadSourceFileAsync(
                         httpClient,
                         item.Url,
+                        item.SourcePath,
                         item.LocalPath,
-                        destinationDirectory,
                         cancellationToken);
                     results.Add(result);
                 }
@@ -159,10 +162,13 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
             _console.MarkupLine($"  [yellow]⚠[/] {failedFiles.Count} source file(s) could not be downloaded via SourceLink");
             
             // Check which files are actually missing (not downloaded successfully)
+            var localPathBySource = workItems.ToDictionary(w => w.SourcePath, w => w.LocalPath);
             var actuallyMissing = new List<string>();
             foreach (var failedFile in failedFiles)
             {
-                var destinationPath = GetDestinationPath(failedFile, destinationDirectory);
+                var destinationPath = localPathBySource.TryGetValue(failedFile, out var mapped)
+                    ? mapped
+                    : GetDestinationPath(failedFile, destinationDirectory);
                 if (!File.Exists(destinationPath))
                 {
                     actuallyMissing.Add(failedFile);
@@ -253,8 +259,8 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
     private async Task<(bool Success, string SourceFilePath)> DownloadSourceFileAsync(
         HttpClient httpClient,
         string url,
+        string sourcePath,
         string localPath,
-        string sourcesDir,
         CancellationToken cancellationToken)
     {
         try
@@ -262,33 +268,28 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
             var response = await httpClient.GetAsync(url, cancellationToken);
             if (response.IsSuccessStatusCode)
             {
-                var content = await response.Content.ReadAsStringAsync(cancellationToken);
-                SaveSourceFile(sourcesDir, localPath, content);
+                // Save the exact bytes the server returned. Decoding to a string and re-encoding
+                // can drop the BOM or change the encoding, which breaks PDB checksum verification.
+                var content = await response.Content.ReadAsByteArrayAsync(cancellationToken);
 
-                return (true, localPath);
+                var directory = Path.GetDirectoryName(localPath);
+                if (directory != null)
+                {
+                    _fileSystem.CreateDirectory(directory);
+                }
+                await _fileSystem.WriteAllBytesAsync(localPath, content);
+
+                return (true, sourcePath);
             }
             else
             {
-                return (false, localPath);
+                return (false, sourcePath);
             }
         }
         catch
         {
-            return (false, localPath);
+            return (false, sourcePath);
         }
-    }
-
-    private void SaveSourceFile(string sourcesDir, string originalPath, string content)
-    {
-        var fullPath = GetDestinationPath(originalPath, sourcesDir);
-        var directory = Path.GetDirectoryName(fullPath);
-
-        if (directory != null)
-        {
-            _fileSystem.CreateDirectory(directory);
-        }
-
-        _fileSystem.WriteAllTextAsync(fullPath, content).Wait();
     }
 
     private string GetDestinationPath(string sourceFilePath, string destinationDirectory)

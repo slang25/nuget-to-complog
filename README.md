@@ -48,6 +48,28 @@ nuget-to-complog Newtonsoft.Json 13.0.3
 
 This creates a `.complog` file in your current directory with all the compilation details.
 
+### Verifying reproducibility
+
+```bash
+# Prove a package round-trips: rebuild it from the complog and byte-compare
+nuget-to-complog verify Serilog 4.4.0
+```
+
+The `verify` command creates a complog, exports it, rebuilds with the exact compiler version
+recorded in the PDB (when installed locally), and byte-compares the result against the assembly
+shipped in the package. Exit codes: `0` byte-for-byte match, `2` content matches but derived
+fields (MVID, timestamps, signature, PDB id) drift, `1` real differences.
+
+To make rebuilds faithful, the tool:
+
+- lists sources in the exact PDB Documents order (source order affects assembly bytes)
+- verifies every source against the PDB checksum and repairs line-ending/BOM drift
+  (Source Link serves committed bytes; the original build may have used a CRLF checkout)
+- resolves reference assemblies by MVID, locating the exact targeting pack version on nuget.org
+- carries Source Link and embedded sources (`/sourcelink`, `/embed`) into the complog
+- reconstructs strong naming: `/publicsign` from the assembly's public key, or full signing
+  when the repo commits its `.snk` (RSA signing is deterministic)
+
 ### Building from source
 
 ```bash

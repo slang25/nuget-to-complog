@@ -320,7 +320,21 @@ public class PackageAnalysisPipeline
         {
             var referencesPath = Path.Combine(workingDirectory, "metadata-references.txt");
             await _fileSystem.WriteAllLinesAsync(referencesPath, metadata.MetadataReferences.Select(r => r.FileName));
+
+            // Full-fidelity records (MVID, timestamp, size) so reference acquisition can verify
+            // it found the exact assemblies the original compiler used, not just same-named ones.
+            var referencesJsonPath = Path.Combine(workingDirectory, "metadata-references.json");
+            await File.WriteAllTextAsync(referencesJsonPath,
+                System.Text.Json.JsonSerializer.Serialize(metadata.MetadataReferences,
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+
             _console.MarkupLine($"  [green]\u2713[/] Saved {metadata.MetadataReferences.Count} metadata references");
+        }
+
+        if (!string.IsNullOrEmpty(metadata.SourceLinkJson))
+        {
+            var sourceLinkPath = Path.Combine(workingDirectory, "source-link.json");
+            await _fileSystem.WriteAllTextAsync(sourceLinkPath, metadata.SourceLinkJson);
         }
 
         if (metadata.EmbeddedResources.Count > 0)
@@ -350,12 +364,35 @@ public class PackageAnalysisPipeline
             var sourcesDir = Path.Combine(workingDirectory, "sources");
             _fileSystem.CreateDirectory(sourcesDir);
 
+            // Derive the original project root so every document keeps its structure relative to
+            // it \u2014 including compiler-generated files under obj/ \u2014 and assign each document its
+            // local path up front. Document order is preserved from the PDB Documents table.
+            var debugConfig = DebugConfigurationExtractor.ExtractDebugConfiguration(assemblyPath);
+            var mapper = SourcePathMapper.Create(metadata.SourceFiles.Select(sf => sf.Path), debugConfig.PdbPath);
+            var sourceFiles = metadata.SourceFiles
+                .Select(sf => sf with { LocalPath = mapper.MapToLocal(sf.Path) })
+                .ToList();
+
             var embeddedCount = 0;
-            foreach (var sourceFile in metadata.SourceFiles.Where(sf => sf.HasContent))
+            foreach (var sourceFile in sourceFiles.Where(sf => sf.HasContent))
             {
-                var fileName = Path.GetFileName(sourceFile.Path);
-                var filePath = Path.Combine(sourcesDir, fileName);
-                await _fileSystem.WriteAllTextAsync(filePath, sourceFile.Content!);
+                var filePath = Path.Combine(sourcesDir, sourceFile.LocalPath!);
+                var directory = Path.GetDirectoryName(filePath);
+                if (directory != null)
+                {
+                    _fileSystem.CreateDirectory(directory);
+                }
+
+                // Write raw bytes: the embedded blob preserves BOM and line endings exactly,
+                // and the document hash must keep matching.
+                if (sourceFile.ContentBytes != null)
+                {
+                    await _fileSystem.WriteAllBytesAsync(filePath, sourceFile.ContentBytes);
+                }
+                else
+                {
+                    await _fileSystem.WriteAllTextAsync(filePath, sourceFile.Content!);
+                }
                 embeddedCount++;
             }
 
@@ -369,7 +406,7 @@ public class PackageAnalysisPipeline
                 if (_sourceDownloader is HttpSourceFileDownloader httpDownloader)
                 {
                     var downloadedCount = await httpDownloader.DownloadSourceFilesAsync(
-                        metadata.SourceFiles,
+                        sourceFiles,
                         metadata.SourceLinkJson,
                         sourcesDir,
                         assemblyPath,
@@ -383,7 +420,7 @@ public class PackageAnalysisPipeline
                 else
                 {
                     var downloadedCount = await _sourceDownloader.DownloadSourceFilesAsync(
-                        metadata.SourceFiles,
+                        sourceFiles,
                         metadata.SourceLinkJson,
                         sourcesDir);
 
@@ -393,6 +430,63 @@ public class PackageAnalysisPipeline
                     }
                 }
             }
+
+            VerifySourceHashes(sourceFiles, sourcesDir);
+
+            var manifest = new SourceManifest(
+                sourceFiles.Select(sf => new SourceManifestEntry(
+                    sf.Path,
+                    sf.LocalPath!,
+                    sf.HashAlgorithm,
+                    sf.Hash != null ? Convert.ToHexStringLower(sf.Hash) : null,
+                    sf.IsEmbedded)).ToList(),
+                mapper.RootPrefix);
+            await manifest.SaveAsync(workingDirectory);
+        }
+    }
+
+    /// <summary>
+    /// Verifies every on-disk source against the checksum in the PDB Documents table, repairing
+    /// line-ending/BOM differences (Source Link serves committed bytes, but the original build may
+    /// have compiled a CRLF checkout). Files that still mismatch will produce a different PDB \u2014
+    /// and through the PdbChecksum debug entry a different assembly \u2014 so they are called out.
+    /// </summary>
+    private void VerifySourceHashes(List<SourceFileInfo> sourceFiles, string sourcesDir)
+    {
+        var fixedCount = 0;
+        var mismatched = new List<string>();
+
+        foreach (var sourceFile in sourceFiles)
+        {
+            var filePath = Path.Combine(sourcesDir, sourceFile.LocalPath!);
+            if (!File.Exists(filePath))
+            {
+                continue;
+            }
+
+            var result = LineEndingNormalizer.VerifyAndFix(filePath, sourceFile.Hash, sourceFile.HashAlgorithm);
+            if (result == SourceHashVerification.Fixed)
+            {
+                fixedCount++;
+            }
+            else if (result == SourceHashVerification.Mismatch)
+            {
+                mismatched.Add(sourceFile.Path);
+            }
+        }
+
+        if (fixedCount > 0)
+        {
+            _console.MarkupLine($"  [green]\u2713[/] Fixed line endings on {fixedCount} source file(s) to match PDB checksums");
+        }
+
+        foreach (var path in mismatched.Take(5))
+        {
+            _console.MarkupLine($"  [yellow]\u26a0[/] Source content does not match PDB checksum: [dim]{path}[/]");
+        }
+        if (mismatched.Count > 5)
+        {
+            _console.MarkupLine($"  [yellow]\u26a0[/] ... and {mismatched.Count - 5} more source checksum mismatches");
         }
     }
 }

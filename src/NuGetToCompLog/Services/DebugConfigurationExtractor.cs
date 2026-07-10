@@ -139,13 +139,10 @@ public class DebugConfiguration
                 // Add /debug- first to disable other debug modes, then /debug:portable
                 flags.Add("/debug-");
                 flags.Add("/debug:portable");
-                
-                // CRITICAL: Explicitly prevent PDB embedding for external PDBs
-                // /debug:portable embeds by default in some contexts
-                // We need /embed- to explicitly prevent embedding and keep PDB external
-                // This is essential for deterministic reproduction - embedding changes binary size
-                flags.Add("/embed-");
-                
+
+                // Note: no "/embed-" here - csc has no such option (CS2007). /debug:portable
+                // alone keeps the PDB external; sources are only embedded via explicit /embed:.
+
                 // Add the PDB path if provided
                 // The caller should provide a writable path (e.g., "output/Package.pdb")
                 // and use /pathmap to make it appear as the original path in metadata

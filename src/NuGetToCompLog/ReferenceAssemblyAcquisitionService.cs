@@ -1,3 +1,4 @@
+using System.Reflection.Metadata;
 using NuGet.Common;
 using NuGet.Frameworks;
 using NuGet.Protocol;
@@ -69,20 +70,26 @@ public class ReferenceAssemblyAcquisitionService
 
     /// <summary>
     /// Acquires all reference assemblies needed for the compilation.
+    ///
+    /// When the PDB recorded reference MVIDs, they are the source of truth: a same-named
+    /// assembly from a different targeting pack or package version produces an identical
+    /// compilation *result* but a different metadata-references blob in the rebuilt PDB,
+    /// breaking byte-for-byte reproduction. So candidates are verified by MVID and the exact
+    /// targeting pack version is located when the local SDK doesn't have it.
     /// </summary>
     public async Task<Dictionary<string, string>> AcquireAllReferencesAsync(
         List<MetadataReference> references,
         string targetFramework)
     {
         var acquiredReferences = new Dictionary<string, string>(); // fileName -> localPath
-        
+
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine("[yellow]Acquiring Reference Assemblies:[/]");
         AnsiConsole.MarkupLine($"  [dim]→ Target framework: {targetFramework ?? "unknown"}[/]");
 
         var frameworkRefs = new List<MetadataReference>();
         var nugetRefs = new List<MetadataReference>();
-        
+
         foreach (var reference in references)
         {
             if (IsFrameworkAssembly(reference.FileName))
@@ -99,35 +106,121 @@ public class ReferenceAssemblyAcquisitionService
         AnsiConsole.MarkupLine($"  [cyan]NuGet package references:[/] {nugetRefs.Count}");
         AnsiConsole.WriteLine();
 
-        // Acquire framework references FIRST to ensure framework versions take precedence over NuGet package versions
+        var frameworkPaths = new Dictionary<string, string>();
         if (frameworkRefs.Count > 0 && !string.IsNullOrEmpty(targetFramework))
         {
-            var frameworkPaths = await AcquireFrameworkReferencesAsync(targetFramework, frameworkRefs);
-            foreach (var kvp in frameworkPaths)
-            {
-                acquiredReferences[kvp.Key] = kvp.Value;
-            }
+            frameworkPaths = await AcquireFrameworkReferencesAsync(targetFramework, frameworkRefs);
         }
 
+        var nugetPaths = new Dictionary<string, string>();
         if (nugetRefs.Count > 0 && !string.IsNullOrEmpty(targetFramework))
         {
-            var nugetPaths = await AcquireNuGetReferencesAsync(nugetRefs, targetFramework);
-            foreach (var kvp in nugetPaths)
+            nugetPaths = await AcquireNuGetReferencesAsync(nugetRefs, targetFramework);
+        }
+
+        // Resolve each expected reference to the candidate matching its recorded MVID;
+        // when neither matches (or no MVID was recorded), framework wins over package to
+        // keep old NuGet versions from shadowing framework assemblies.
+        var mvidMatched = 0;
+        var mvidMismatched = new List<string>();
+        var withMvid = 0;
+        foreach (var reference in references)
+        {
+            var fileName = Path.GetFileName(reference.FileName);
+            frameworkPaths.TryGetValue(fileName, out var frameworkPath);
+            nugetPaths.TryGetValue(fileName, out var nugetPath);
+
+            if (frameworkPath == null && nugetPath == null)
             {
-                // Prevent old NuGet package versions from overriding framework versions
-                if (!acquiredReferences.ContainsKey(kvp.Key))
+                continue;
+            }
+
+            string chosen;
+            if (reference.Mvid != Guid.Empty)
+            {
+                withMvid++;
+                if (frameworkPath != null && TryReadMvid(frameworkPath) == reference.Mvid)
                 {
-                    acquiredReferences[kvp.Key] = kvp.Value;
+                    chosen = frameworkPath;
+                    mvidMatched++;
+                }
+                else if (nugetPath != null && TryReadMvid(nugetPath) == reference.Mvid)
+                {
+                    chosen = nugetPath;
+                    mvidMatched++;
                 }
                 else
                 {
-                    AnsiConsole.MarkupLine($"  [dim]→ Skipping {kvp.Key} (using framework version)[/]");
+                    chosen = frameworkPath ?? nugetPath!;
+                    mvidMismatched.Add(fileName);
+                }
+            }
+            else
+            {
+                chosen = frameworkPath ?? nugetPath!;
+            }
+
+            acquiredReferences[fileName] = chosen;
+        }
+
+        // For package references that still mismatch, hunt through the package's other
+        // versions on nuget.org for the exact assembly.
+        if (mvidMismatched.Count > 0)
+        {
+            var recovered = await RecoverExactPackageVersionsAsync(
+                references.Where(r => mvidMismatched.Contains(Path.GetFileName(r.FileName)) && r.Mvid != Guid.Empty).ToList(),
+                targetFramework!,
+                acquiredReferences);
+            mvidMatched += recovered;
+            if (recovered > 0)
+            {
+                mvidMismatched = mvidMismatched
+                    .Where(f => acquiredReferences.TryGetValue(f, out var p) &&
+                                TryReadMvid(p) != references.First(r => Path.GetFileName(r.FileName) == f).Mvid)
+                    .ToList();
+            }
+        }
+
+        if (withMvid > 0)
+        {
+            if (mvidMismatched.Count == 0)
+            {
+                AnsiConsole.MarkupLine($"  [green]✓[/] All {mvidMatched} references verified against PDB-recorded MVIDs");
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"  [yellow]⚠[/] {mvidMismatched.Count} reference(s) do not match the original build's MVIDs:");
+                foreach (var name in mvidMismatched.Take(5))
+                {
+                    AnsiConsole.MarkupLine($"    [dim]• {name}[/]");
+                }
+                if (mvidMismatched.Count > 5)
+                {
+                    AnsiConsole.MarkupLine($"    [dim]... and {mvidMismatched.Count - 5} more[/]");
                 }
             }
         }
 
         AnsiConsole.MarkupLine($"[green]✓[/] Acquired {acquiredReferences.Count} reference assemblies");
         return acquiredReferences;
+    }
+
+    /// <summary>
+    /// Reads the MVID from an assembly on disk, or null if unreadable.
+    /// </summary>
+    internal static Guid? TryReadMvid(string assemblyPath)
+    {
+        try
+        {
+            using var stream = File.OpenRead(assemblyPath);
+            using var peReader = new System.Reflection.PortableExecutable.PEReader(stream);
+            var reader = peReader.GetMetadataReader();
+            return reader.GetGuid(reader.GetModuleDefinition().Mvid);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -146,14 +239,31 @@ public class ReferenceAssemblyAcquisitionService
             AnsiConsole.MarkupLine($"  [cyan]→[/] Downloading individual System.* packages for {targetFramework}...");
             return await DownloadIndividualSystemPackagesAsync(targetFramework, frameworkRefs);
         }
-        
+
 
         var sdkResult = await TryAcquireFromLocalSdkAsync(targetFramework, frameworkRefs);
-        if (sdkResult.Count > 0)
+        if (sdkResult.Count > 0 && FrameworkRefsMatchByMvid(sdkResult, frameworkRefs))
         {
             return sdkResult;
         }
-        
+
+        // The local SDK doesn't have the exact targeting pack the original build used (or has
+        // none at all). When MVIDs are known, locate the exact pack version on nuget.org.
+        if (frameworkRefs.Any(r => r.Mvid != Guid.Empty))
+        {
+            var exactResult = await TryAcquireExactRefPackFromNuGetAsync(targetFramework, frameworkRefs);
+            if (exactResult.Count > 0)
+            {
+                return exactResult;
+            }
+        }
+
+        if (sdkResult.Count > 0)
+        {
+            AnsiConsole.MarkupLine($"  [yellow]⚠[/] Using local SDK reference assemblies (exact targeting pack not found)");
+            return sdkResult;
+        }
+
 
         if (!_frameworkToPackageMap.TryGetValue(targetFramework, out var packageInfo))
         {
@@ -300,82 +410,269 @@ public class ReferenceAssemblyAcquisitionService
     }
 
     /// <summary>
-    /// Fallback: Try to acquire framework assemblies from the local .NET SDK.
+    /// Fallback: Try to acquire framework assemblies from the local .NET SDK. When the PDB
+    /// recorded reference MVIDs, the installed targeting pack version that actually matches
+    /// them is preferred over simply the newest.
     /// </summary>
     private async Task<Dictionary<string, string>> TryAcquireFromLocalSdkAsync(
         string targetFramework,
         List<MetadataReference> frameworkRefs)
     {
         var result = new Dictionary<string, string>();
-        
+
         var dotnetRoot = GetDotNetRoot();
         if (dotnetRoot == null)
         {
             return result;
         }
 
-
         var packsDir = Path.Combine(dotnetRoot, "packs");
-        if (Directory.Exists(packsDir))
+        if (!Directory.Exists(packsDir))
         {
+            return result;
+        }
 
-            var appRefDir = Path.Combine(packsDir, "Microsoft.NETCore.App.Ref");
-            if (Directory.Exists(appRefDir))
+        var packNames = targetFramework.StartsWith("netstandard")
+            ? new[] { "Microsoft.NETCore.App.Ref", "NETStandard.Library.Ref" }
+            : ["Microsoft.NETCore.App.Ref"];
+
+        var candidateDirs = packNames
+            .Select(name => Path.Combine(packsDir, name))
+            .Where(Directory.Exists)
+            .SelectMany(Directory.GetDirectories)
+            .OrderByDescending(d => d)
+            .Select(versionDir => Path.Combine(versionDir, "ref", targetFramework))
+            .Where(refPath => Directory.Exists(refPath) &&
+                              Directory.GetFiles(refPath, "*.dll", SearchOption.TopDirectoryOnly).Length > 0)
+            .ToList();
+
+        if (candidateDirs.Count == 0)
+        {
+            return result;
+        }
+
+        var chosen = candidateDirs.FirstOrDefault(dir => DirectoryMatchesMvids(dir, frameworkRefs))
+                     ?? candidateDirs[0];
+
+        foreach (var dll in Directory.GetFiles(chosen, "*.dll", SearchOption.TopDirectoryOnly))
+        {
+            result[Path.GetFileName(dll)] = dll;
+        }
+
+        AnsiConsole.MarkupLine($"    [green]✓[/] Found {result.Count} framework assemblies in local SDK");
+        return await Task.FromResult(result);
+    }
+
+    /// <summary>
+    /// Probes a few assemblies in a directory against the MVIDs recorded in the PDB. Targeting
+    /// packs are internally consistent, so a handful of matches identifies the pack version.
+    /// </summary>
+    private static bool DirectoryMatchesMvids(string directory, List<MetadataReference> references, int probeCount = 5)
+    {
+        var probes = references
+            .Where(r => r.Mvid != Guid.Empty)
+            .Select(r => (r.Mvid, Path: Path.Combine(directory, Path.GetFileName(r.FileName))))
+            .Where(p => File.Exists(p.Path))
+            .Take(probeCount)
+            .ToList();
+
+        return probes.Count > 0 && probes.All(p => TryReadMvid(p.Path) == p.Mvid);
+    }
+
+    private static bool FrameworkRefsMatchByMvid(Dictionary<string, string> acquired, List<MetadataReference> references, int probeCount = 5)
+    {
+        var probes = references
+            .Where(r => r.Mvid != Guid.Empty && acquired.ContainsKey(Path.GetFileName(r.FileName)))
+            .Take(probeCount)
+            .ToList();
+
+        // No MVIDs recorded (or nothing acquired to probe): nothing to verify against, accept.
+        if (probes.Count == 0)
+        {
+            return true;
+        }
+
+        return probes.All(p => TryReadMvid(acquired[Path.GetFileName(p.FileName)]) == p.Mvid);
+    }
+
+    /// <summary>
+    /// Locates the exact targeting pack version on nuget.org by probing candidate versions'
+    /// assemblies against the MVIDs recorded in the PDB. Versions are probed newest-first by
+    /// reading a single assembly out of each candidate .nupkg before committing to a full extract.
+    /// </summary>
+    private async Task<Dictionary<string, string>> TryAcquireExactRefPackFromNuGetAsync(
+        string targetFramework,
+        List<MetadataReference> frameworkRefs)
+    {
+        var result = new Dictionary<string, string>();
+
+        if (!_frameworkToPackageMap.TryGetValue(targetFramework, out var packageInfo))
+        {
+            return result;
+        }
+        var packageId = packageInfo.Split('/')[0];
+
+        var probe = frameworkRefs.FirstOrDefault(r => r.Mvid != Guid.Empty);
+        if (probe == null)
+        {
+            return result;
+        }
+        var probeFileName = Path.GetFileName(probe.FileName);
+
+        try
+        {
+            var cache = new SourceCacheContext();
+            var repository = Repository.Factory.GetCoreV3("https://api.nuget.org/v3/index.json");
+            var resource = await repository.GetResourceAsync<FindPackageByIdResource>();
+            var allVersions = await resource.GetAllVersionsAsync(packageId, cache, _logger, CancellationToken.None);
+
+            // Restrict to the target framework's major.minor (e.g. net9.0 -> 9.0.x).
+            var tfmVersion = NuGetFramework.Parse(targetFramework).Version;
+            var candidates = allVersions
+                .Where(v => !v.IsPrerelease && v.Major == tfmVersion.Major && v.Minor == tfmVersion.Minor)
+                .OrderByDescending(v => v)
+                .Take(30)
+                .ToList();
+
+            AnsiConsole.MarkupLine($"  [cyan]→[/] Probing {packageId} versions on nuget.org for exact reference MVIDs...");
+
+            foreach (var version in candidates)
             {
+                var packagePath = await DownloadPackageAsync(packageId, version.ToNormalizedString());
 
-                var versionDirs = Directory.GetDirectories(appRefDir);
-                foreach (var versionDir in versionDirs.OrderByDescending(d => d))
+                using (var archive = System.IO.Compression.ZipFile.OpenRead(packagePath))
                 {
-                    var refPath = Path.Combine(versionDir, "ref", targetFramework);
-                    if (Directory.Exists(refPath))
+                    var entry = archive.GetEntry($"ref/{targetFramework}/{probeFileName}");
+                    if (entry == null)
                     {
-                        var dlls = Directory.GetFiles(refPath, "*.dll", SearchOption.TopDirectoryOnly);
-                        foreach (var dll in dlls)
-                        {
-                            var fileName = Path.GetFileName(dll);
-                            result[fileName] = dll;
-                        }
-                        
-                        if (result.Count > 0)
-                        {
-                            AnsiConsole.MarkupLine($"    [green]✓[/] Found {result.Count} framework assemblies in local SDK");
-                            return result;
-                        }
+                        continue;
+                    }
+
+                    using var entryStream = entry.Open();
+                    using var buffer = new MemoryStream();
+                    await entryStream.CopyToAsync(buffer);
+                    using var peReader = new System.Reflection.PortableExecutable.PEReader(
+                        System.Collections.Immutable.ImmutableArray.Create(buffer.ToArray()));
+                    var reader = peReader.GetMetadataReader();
+                    if (reader.GetGuid(reader.GetModuleDefinition().Mvid) != probe.Mvid)
+                    {
+                        continue;
                     }
                 }
-            }
-            
 
-            if (targetFramework.StartsWith("netstandard"))
-            {
-                var netstandardRefDir = Path.Combine(packsDir, "NETStandard.Library.Ref");
-                if (Directory.Exists(netstandardRefDir))
+                var extractPath = Path.Combine(_workingDirectory, "framework-refs", $"{packageId}.{version}");
+                Directory.CreateDirectory(extractPath);
+                System.IO.Compression.ZipFile.ExtractToDirectory(packagePath, extractPath, overwriteFiles: true);
+
+                var refDir = Path.Combine(extractPath, "ref", targetFramework);
+                foreach (var dll in Directory.GetFiles(refDir, "*.dll", SearchOption.TopDirectoryOnly))
                 {
-                    var versionDirs = Directory.GetDirectories(netstandardRefDir);
-                    foreach (var versionDir in versionDirs.OrderByDescending(d => d))
+                    result[Path.GetFileName(dll)] = dll;
+                }
+
+                AnsiConsole.MarkupLine($"    [green]✓[/] Exact targeting pack: {packageId} {version} ({result.Count} assemblies)");
+                return result;
+            }
+
+            AnsiConsole.MarkupLine($"    [yellow]⚠[/] No {packageId} version matched the recorded MVIDs");
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine($"    [yellow]⚠[/] Failed probing targeting pack versions: {ex.Message}");
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// For package references whose acquired assembly doesn't match the PDB-recorded MVID
+    /// (the PDB stores only file names, so acquisition guesses the version), probes other
+    /// versions of the package for the exact assembly.
+    /// </summary>
+    private async Task<int> RecoverExactPackageVersionsAsync(
+        List<MetadataReference> mismatchedRefs,
+        string targetFramework,
+        Dictionary<string, string> acquiredReferences)
+    {
+        var recovered = 0;
+
+        foreach (var reference in mismatchedRefs)
+        {
+            var fileName = Path.GetFileName(reference.FileName);
+            var packageInfo = ExtractPackageInfoFromPath(reference.FileName);
+            if (packageInfo == null)
+            {
+                continue;
+            }
+
+            var exactPath = await TryFindExactPackageAssemblyAsync(
+                packageInfo.Value.PackageId, fileName, reference.Mvid, targetFramework);
+            if (exactPath != null)
+            {
+                acquiredReferences[fileName] = exactPath;
+                recovered++;
+            }
+        }
+
+        return recovered;
+    }
+
+    private async Task<string?> TryFindExactPackageAssemblyAsync(
+        string packageId,
+        string fileName,
+        Guid expectedMvid,
+        string targetFramework,
+        int maxProbes = 15)
+    {
+        try
+        {
+            var cache = new SourceCacheContext();
+            var repository = Repository.Factory.GetCoreV3("https://api.nuget.org/v3/index.json");
+            var resource = await repository.GetResourceAsync<FindPackageByIdResource>();
+            var versions = (await resource.GetAllVersionsAsync(packageId, cache, _logger, CancellationToken.None))
+                .Where(v => !v.IsPrerelease)
+                .OrderByDescending(v => v)
+                .Take(maxProbes)
+                .ToList();
+
+            foreach (var version in versions)
+            {
+                var packagePath = await DownloadPackageAsync(packageId, version.ToNormalizedString());
+                var extractPath = Path.Combine(_workingDirectory, "nuget-refs", $"{packageId}.{version}");
+                if (!Directory.Exists(extractPath))
+                {
+                    Directory.CreateDirectory(extractPath);
+                    System.IO.Compression.ZipFile.ExtractToDirectory(packagePath, extractPath, overwriteFiles: true);
+                }
+
+                foreach (var folder in new[] { "ref", "lib" })
+                {
+                    var folderPath = Path.Combine(extractPath, folder);
+                    if (!Directory.Exists(folderPath))
                     {
-                        var refPath = Path.Combine(versionDir, "ref", targetFramework);
-                        if (Directory.Exists(refPath))
-                        {
-                            var dlls = Directory.GetFiles(refPath, "*.dll", SearchOption.TopDirectoryOnly);
-                            foreach (var dll in dlls)
-                            {
-                                var fileName = Path.GetFileName(dll);
-                                result[fileName] = dll;
-                            }
-                            
-                            if (result.Count > 0)
-                            {
-                                AnsiConsole.MarkupLine($"    [green]✓[/] Found {result.Count} framework assemblies in local SDK");
-                                return result;
-                            }
-                        }
+                        continue;
+                    }
+
+                    var bestMatch = SelectBestTfmFolder(Directory.GetDirectories(folderPath), targetFramework);
+                    if (bestMatch == null)
+                    {
+                        continue;
+                    }
+
+                    var candidate = Path.Combine(bestMatch, fileName);
+                    if (File.Exists(candidate) && TryReadMvid(candidate) == expectedMvid)
+                    {
+                        AnsiConsole.MarkupLine($"    [green]✓[/] Exact package assembly: {packageId} {version} for {fileName}");
+                        return candidate;
                     }
                 }
             }
         }
+        catch
+        {
+        }
 
-        return result;
+        return null;
     }
 
     /// <summary>

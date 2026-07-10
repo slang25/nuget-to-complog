@@ -36,6 +36,9 @@ dotnet run -- Newtonsoft.Json 13.0.3
 
 # Latest version
 dotnet run -- Microsoft.Extensions.Logging
+
+# Verify byte-for-byte reproducibility (rebuild from complog + compare)
+dotnet run -- verify Serilog 4.4.0
 ```
 
 ## Running Tests

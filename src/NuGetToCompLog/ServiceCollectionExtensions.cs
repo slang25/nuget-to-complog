@@ -116,6 +116,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<EjectPackageCommandHandler>();
         services.AddSingleton<DiffCommandHandler>();
         services.AddSingleton<ApplyCommandHandler>();
+        services.AddSingleton<VerifyCommandHandler>();
 
         return services;
     }
