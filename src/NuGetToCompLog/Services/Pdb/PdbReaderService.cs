@@ -93,6 +93,10 @@ public class PdbReaderService : IPdbReader
         return await Task.FromResult(metadataReaderProvider.GetMetadataReader());
     }
 
+    // Document hash algorithm GUIDs per the Portable PDB specification.
+    private static readonly Guid HashAlgorithmSha1 = new("ff1816ec-aa5e-4d10-87f7-6f4963833460");
+    private static readonly Guid HashAlgorithmSha256 = new("8829d00f-11b8-4213-878b-770e8597ac16");
+
     private List<SourceFileInfo> ExtractSourceFiles(MetadataReader metadataReader)
     {
         var sourceFiles = new List<SourceFileInfo>();
@@ -101,6 +105,13 @@ public class PdbReaderService : IPdbReader
         {
             var document = metadataReader.GetDocument(docHandle);
             var name = metadataReader.GetString(document.Name);
+
+            var hash = document.Hash.IsNil ? null : metadataReader.GetBlobBytes(document.Hash);
+            var algorithmGuid = document.HashAlgorithm.IsNil ? default : metadataReader.GetGuid(document.HashAlgorithm);
+            string? hashAlgorithm =
+                algorithmGuid == HashAlgorithmSha256 ? "sha256" :
+                algorithmGuid == HashAlgorithmSha1 ? "sha1" :
+                null;
 
             var embeddedSource = metadataReader.GetCustomDebugInformation(docHandle)
                 .Select(h => metadataReader.GetCustomDebugInformation(h))
@@ -112,13 +123,15 @@ public class PdbReaderService : IPdbReader
             bool isEmbedded = embeddedSource.HasValue && embeddedSource.Value.Kind != default;
 
             string? content = null;
+            byte[]? contentBytes = null;
             if (isEmbedded && embeddedSource.HasValue)
             {
                 var embeddedSourceBlob = metadataReader.GetBlobBytes(embeddedSource.Value.Value);
-                content = DecompressEmbeddedSource(embeddedSourceBlob);
+                contentBytes = DecompressEmbeddedSourceBytes(embeddedSourceBlob);
+                content = contentBytes != null ? System.Text.Encoding.UTF8.GetString(contentBytes) : null;
             }
 
-            sourceFiles.Add(new SourceFileInfo(name, content, isEmbedded, null));
+            sourceFiles.Add(new SourceFileInfo(name, content, isEmbedded, null, contentBytes, hash, hashAlgorithm));
         }
 
         return sourceFiles;
@@ -150,7 +163,7 @@ public class PdbReaderService : IPdbReader
         return null;
     }
 
-    private string? DecompressEmbeddedSource(byte[] blob)
+    private byte[]? DecompressEmbeddedSourceBytes(byte[] blob)
     {
         if (blob.Length < 4)
         {
@@ -163,7 +176,7 @@ public class PdbReaderService : IPdbReader
 
             if (uncompressedSize == 0)
             {
-                return System.Text.Encoding.UTF8.GetString(blob, 4, blob.Length - 4);
+                return blob[4..];
             }
 
             using var compressedStream = new MemoryStream(blob, 4, blob.Length - 4);
@@ -172,7 +185,7 @@ public class PdbReaderService : IPdbReader
 
             deflateStream.CopyTo(decompressedStream);
 
-            return System.Text.Encoding.UTF8.GetString(decompressedStream.ToArray());
+            return decompressedStream.ToArray();
         }
         catch
         {

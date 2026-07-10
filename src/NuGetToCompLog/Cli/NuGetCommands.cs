@@ -15,6 +15,7 @@ public class NuGetCommands
     private readonly EjectPackageCommandHandler _ejectHandler;
     private readonly DiffCommandHandler _diffHandler;
     private readonly ApplyCommandHandler _applyHandler;
+    private readonly VerifyCommandHandler _verifyHandler;
     private readonly IConsoleWriter _console;
 
     public NuGetCommands(
@@ -22,12 +23,14 @@ public class NuGetCommands
         EjectPackageCommandHandler ejectHandler,
         DiffCommandHandler diffHandler,
         ApplyCommandHandler applyHandler,
+        VerifyCommandHandler verifyHandler,
         IConsoleWriter console)
     {
         _processHandler = processHandler;
         _ejectHandler = ejectHandler;
         _diffHandler = diffHandler;
         _applyHandler = applyHandler;
+        _verifyHandler = verifyHandler;
         _console = console;
     }
 
@@ -52,6 +55,28 @@ public class NuGetCommands
                 Environment.ExitCode = 1;
                 return;
             }
+        }
+        finally
+        {
+            _console.ClearProgress();
+        }
+    }
+
+    /// <summary>
+    /// Verify a package round-trips: create a complog, rebuild from it with the exact compiler,
+    /// and byte-compare the result against the assembly shipped in the package.
+    /// </summary>
+    /// <param name="packageId">The NuGet package identifier (e.g., Serilog)</param>
+    /// <param name="version">The package version. If not specified, uses latest stable version.</param>
+    [Command("verify")]
+    public async Task Verify(
+        [Argument] string packageId,
+        [Argument] string? version = null)
+    {
+        _console.SetIndeterminateProgress();
+        try
+        {
+            Environment.ExitCode = await _verifyHandler.HandleAsync(packageId, version);
         }
         finally
         {
