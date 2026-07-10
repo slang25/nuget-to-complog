@@ -307,8 +307,12 @@ public class VerifyCommandHandler
         startInfo.ArgumentList.Add("@build.rsp");
 
         using var process = Process.Start(startInfo)!;
-        var stdout = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderr = await process.StandardError.ReadToEndAsync(cancellationToken);
+        // Drain both streams concurrently: reading one to completion before the other can
+        // deadlock if the child fills a pipe buffer on the stream we're not yet reading.
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
         await process.WaitForExitAsync(cancellationToken);
         return (process.ExitCode, stdout + stderr);
     }
