@@ -42,7 +42,7 @@
          Basic.CompilerLog.Util. Fixes GHSA-hv8m-jj95-wg3x (patched in 3.1.7). Remove once the
          upstream package bumps its MessagePack dependency past 3.1.7. -->
     <PackageReference Include="MessagePack" Version="3.1.7" />
-    <PackageReference Include="IgnoresAccessChecksToGenerator" Version="0.8.0" PrivateAssets="All" />
+    <PackageReference Include="IgnoresAccessChecksToGenerator" Version="1.0.0" PrivateAssets="All" />
     <PackageReference Include="ICSharpCode.Decompiler" Version="10.1.0.8386" />
   </ItemGroup>
   <ItemGroup>
