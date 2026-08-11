@@ -30,13 +30,13 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.9" />
-    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.9" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.10" />
     <PackageReference Include="NuGet.Protocol" Version="7.6.0" />
     <PackageReference Include="Spectre.Console" Version="0.57.2" />
     <PackageReference Include="System.IO.Compression" Version="4.3.0" />
-    <PackageReference Include="System.Reflection.Metadata" Version="10.0.9" />
-    <PackageReference Include="System.Text.Json" Version="10.0.9" />
+    <PackageReference Include="System.Reflection.Metadata" Version="10.0.10" />
+    <PackageReference Include="System.Text.Json" Version="10.0.10" />
     <PackageReference Include="Basic.CompilerLog.Util" Version="0.9.47" />
     <!-- Direct reference to override the vulnerable MessagePack 3.1.4 pulled in transitively by
          Basic.CompilerLog.Util. Fixes GHSA-hv8m-jj95-wg3x (patched in 3.1.7). Remove once the
