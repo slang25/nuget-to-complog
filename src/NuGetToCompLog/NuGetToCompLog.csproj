@@ -43,7 +43,7 @@
          upstream package bumps its MessagePack dependency past 3.1.7. -->
     <PackageReference Include="MessagePack" Version="3.1.8" />
     <PackageReference Include="IgnoresAccessChecksToGenerator" Version="1.0.0" PrivateAssets="All" />
-    <PackageReference Include="ICSharpCode.Decompiler" Version="10.1.1.8388" />
+    <PackageReference Include="ICSharpCode.Decompiler" Version="11.0.0.9375" />
   </ItemGroup>
   <ItemGroup>
     <IgnoresAccessChecksTo Include="Basic.CompilerLog.Util" />
