@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Spectre.Console;
 using NuGetToCompLog.Services;
+using NuGetToCompLog.Services.Reconstruction;
 
 namespace NuGetToCompLog;
 
@@ -19,8 +20,10 @@ public class CompLogFileCreator
         string workingDirectory,
         string outputDirectory,
         string? overrideTfm = null,
-        List<string>? selectedAssemblies = null)
+        List<string>? selectedAssemblies = null,
+        ReconstructionLedger? ledger = null)
     {
+        ledger ??= new ReconstructionLedger();
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine("[yellow]Creating .complog file...[/]");
 
@@ -93,8 +96,13 @@ public class CompLogFileCreator
             }
 
             var argsDict = ParseCompilerArgumentsFile(compilerArgs);
-            var compilerPath = FindCompilerPath(isCSharp, argsDict.GetValueOrDefault("compiler-version"));
+            var compilerPath = FindCompilerPath(isCSharp, argsDict.GetValueOrDefault("compiler-version"), ledger);
             var targetFramework = overrideTfm ?? ExtractTargetFramework(argsDict);
+            ledger.Recorded(ReconstructionLedger.CategoryOption, "compilation options blob",
+                "read from the PDB's compilation-options custom debug information",
+                argsDict.Count(kvp => kvp.Key != "__extra_args__"));
+            ledger.Derived(ReconstructionLedger.CategoryOption, "/debug",
+                $"{debugConfig.DebugType} debug settings read from the assembly's debug directory");
             
             if (overrideTfm != null && overrideTfm != ExtractTargetFramework(argsDict))
             {
@@ -130,7 +138,7 @@ public class CompLogFileCreator
             Dictionary<string, string> acquiredReferences = new();
             if (metadataReferences.Count > 0 && !string.IsNullOrEmpty(targetFramework))
             {
-                var acquisitionService = new ReferenceAssemblyAcquisitionService(workingDirectory);
+                var acquisitionService = new ReferenceAssemblyAcquisitionService(workingDirectory, ledger);
                 acquiredReferences = await acquisitionService.AcquireAllReferencesAsync(metadataReferences, targetFramework);
                 
                 if (acquiredReferences.Count == 0)
@@ -148,7 +156,7 @@ public class CompLogFileCreator
             }
 
             var manifest = SourceManifest.TryLoad(workingDirectory);
-            var strongNameArgs = await PrepareStrongNameArgsAsync(assemblyPath, workingDirectory, diagnostics);
+            var strongNameArgs = await PrepareStrongNameArgsAsync(assemblyPath, workingDirectory, ledger);
             CopyOriginalPdbNextToSources(assemblyPath, workingDirectory, debugConfig, manifest);
 
             // Generator-produced documents can only be reproduced exactly by running the actual
@@ -159,10 +167,10 @@ public class CompLogFileCreator
             {
                 generatorPlan = await Services.Generators.SourceGeneratorAcquisitionService.TryPlanAsync(
                     workingDirectory, manifest, argsDict, acquiredReferences,
-                    Path.GetFileNameWithoutExtension(assemblyPath));
+                    Path.GetFileNameWithoutExtension(assemblyPath), ledger);
             }
 
-            var args = BuildCompilerArguments(argsDict, assemblyPath, workingDirectory, acquiredReferences, debugConfig, manifest, strongNameArgs, generatorPlan);
+            var args = BuildCompilerArguments(argsDict, assemblyPath, workingDirectory, acquiredReferences, debugConfig, manifest, strongNameArgs, generatorPlan, ledger);
 
             var projectDir = Path.Combine(workingDirectory, "sources");
             var projectFilePath = Path.Combine(projectDir, $"{packageId}.csproj");
@@ -204,6 +212,13 @@ public class CompLogFileCreator
             AnsiConsole.MarkupLine($"  [red]✗[/] Error creating complog: {ex.Message}");
             AnsiConsole.MarkupLine($"  [dim]{ex.StackTrace}[/]");
             diagnostics.Add($"Error creating complog: {ex.Message}");
+        }
+
+        if (File.Exists(complogPath))
+        {
+            var ledgerPath = Path.Combine(outputDirectory, $"{packageId}.{version}.reconstruction.json");
+            await ledger.SaveAsync(ledgerPath);
+            ledger.Render(new Infrastructure.Console.SpectreConsoleWriter(), ledgerPath);
         }
 
         if (diagnostics.Count > 0)
@@ -286,7 +301,7 @@ public class CompLogFileCreator
     private static async Task<List<string>> PrepareStrongNameArgsAsync(
         string assemblyPath,
         string workingDirectory,
-        List<string> diagnostics)
+        ReconstructionLedger? ledger)
     {
         var strongName = StrongNameUtil.TryGetStrongNameInfo(assemblyPath);
         if (strongName == null)
@@ -307,6 +322,8 @@ public class CompLogFileCreator
                 var keyPath = Path.Combine(sourcesDir, "signing-key.snk");
                 await File.WriteAllBytesAsync(keyPath, repoKey);
                 AnsiConsole.MarkupLine("  [green]✓[/] Found matching signing key (.snk) in source repository - using full signing");
+                ledger?.Proven(ReconstructionLedger.CategorySigning, "/keyfile",
+                    "the committed .snk from the source repository, matching the assembly's public key");
                 return ["/keyfile:signing-key.snk"];
             }
         }
@@ -315,8 +332,14 @@ public class CompLogFileCreator
         await File.WriteAllBytesAsync(publicKeyPath, strongName.PublicKey);
         if (strongName.IsSigned)
         {
-            diagnostics.Add("Assembly is fully strong-name signed but no matching .snk was found in the repo; " +
-                            "using /publicsign - the strong name signature bytes will not match the original");
+            ledger?.Substituted(ReconstructionLedger.CategorySigning, "/publicsign",
+                "the assembly is fully signed but no matching .snk was found in the repo, so the strong " +
+                "name signature bytes are left zeroed");
+        }
+        else
+        {
+            ledger?.Derived(ReconstructionLedger.CategorySigning, "/publicsign",
+                "public key extracted from the assembly; the original was public-signed too");
         }
         AnsiConsole.MarkupLine("  [cyan]→[/] Strong-named assembly: using /publicsign with extracted public key");
         return ["/publicsign+", "/keyfile:public-key.snk"];
@@ -547,7 +570,8 @@ public class CompLogFileCreator
         DebugConfiguration debugConfig,
         SourceManifest? manifest,
         List<string> strongNameArgs,
-        Services.Generators.GeneratorPlan? generatorPlan = null)
+        Services.Generators.GeneratorPlan? generatorPlan = null,
+        ReconstructionLedger? ledger = null)
     {
         var args = new List<string>();
         
@@ -688,6 +712,8 @@ public class CompLogFileCreator
         if (UsesNullablePublicOnly(assemblyPath))
         {
             args.Add("/features:nullablePublicOnly");
+            ledger?.Inferred(ReconstructionLedger.CategoryOption, "/features:nullablePublicOnly",
+                "csc never records /features:, so this was read off the shipped assembly");
         }
 
         // [Experimental("ID")] APIs raise ID as an *error* by default, so a library that uses
@@ -699,6 +725,10 @@ public class CompLogFileCreator
         if (experimentalIds.Count > 0)
         {
             args.Add($"/nowarn:{string.Join(",", experimentalIds)}");
+            ledger?.Inferred(ReconstructionLedger.CategoryOption, "/nowarn",
+                $"[Experimental] diagnostic id(s) {string.Join(", ", experimentalIds)} read from the assembly " +
+                "and its references; the original build must have muted them to compile at all",
+                experimentalIds.Count);
         }
         
         // Additional metadata args
@@ -873,7 +903,8 @@ public class CompLogFileCreator
         return args.ToArray();
     }
 
-    private static string? FindCompilerPath(bool isCSharp, string? compilerVersion = null)
+    private static string? FindCompilerPath(
+        bool isCSharp, string? compilerVersion = null, ReconstructionLedger? ledger = null)
     {
         var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT")
             ?? "/usr/local/share/dotnet";
@@ -901,10 +932,15 @@ public class CompLogFileCreator
             if (exact != null)
             {
                 AnsiConsole.MarkupLine($"  [green]✓[/] Found exact compiler version {compilerVersion.Split('+')[0]} in local SDKs");
+                ledger?.Proven(ReconstructionLedger.CategoryCompiler, compilerVersion.Split('+')[0],
+                    "the exact compiler recorded in the PDB, found in an installed SDK");
                 return exact;
             }
 
             AnsiConsole.MarkupLine($"  [yellow]⚠[/] Compiler {compilerVersion.Split('+')[0]} not installed locally; complog will reference the newest SDK compiler");
+            ledger?.Assumed(ReconstructionLedger.CategoryCompiler, compilerVersion.Split('+')[0],
+                "not installed locally, so the complog references the newest SDK compiler - " +
+                "codegen and generated-document checksums differ between compiler versions");
         }
 
         return candidates.FirstOrDefault();

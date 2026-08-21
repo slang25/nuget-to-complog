@@ -1,3 +1,5 @@
+using NuGetToCompLog.Services.Reconstruction;
+
 namespace NuGetToCompLog.Domain;
 
 /// <summary>
@@ -13,4 +15,5 @@ public record PackageExtractionResult(
     string? CompilerArgsFile,
     string? MetadataRefsFile,
     string SourcesDirectory,
-    string? ResourcesDirectory);
+    string? ResourcesDirectory,
+    ReconstructionLedger Ledger);

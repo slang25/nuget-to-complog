@@ -9,6 +9,7 @@ using NuGet.Common;
 using NuGet.Protocol;
 using NuGet.Protocol.Core.Types;
 using NuGet.Versioning;
+using NuGetToCompLog.Services.Reconstruction;
 using Spectre.Console;
 
 namespace NuGetToCompLog.Services.Generators;
@@ -71,7 +72,8 @@ public static class SourceGeneratorAcquisitionService
         SourceManifest manifest,
         Dictionary<string, string> argsDict,
         Dictionary<string, string> acquiredReferences,
-        string assemblyName)
+        string assemblyName,
+        ReconstructionLedger? ledger = null)
     {
         var sourcesDir = Path.Combine(workingDirectory, "sources");
         var byAssembly = new Dictionary<string, List<GeneratedDocument>>();
@@ -151,6 +153,28 @@ public static class SourceGeneratorAcquisitionService
             return plan;
         }
 
+        // How each generator ended up, recorded once the all-or-nothing decision is settled.
+        var attached = new Dictionary<string, string>(StringComparer.Ordinal);
+        GeneratorPlan? Done(GeneratorPlan? result)
+        {
+            foreach (var (generatorAssembly, docs) in byAssembly)
+            {
+                if (result != null && attached.TryGetValue(generatorAssembly, out var provenance))
+                {
+                    ledger?.Proven(ReconstructionLedger.CategoryGenerator, generatorAssembly,
+                        $"{provenance} regenerates all {docs.Count} document(s) with the recorded checksum, " +
+                        "attached as /analyzer", docs.Count);
+                }
+                else
+                {
+                    ledger?.Substituted(ReconstructionLedger.CategoryGenerator, generatorAssembly,
+                        $"{docs.Count} generated document(s) passed as plain source files - csc will hash them " +
+                        "with the compilation's checksum algorithm, not the generator's", docs.Count);
+                }
+            }
+            return result;
+        }
+
         foreach (var (generatorAssembly, docs) in byAssembly)
         {
             var expected = new Dictionary<(string Type, string File), ExpectedDocument>();
@@ -197,7 +221,7 @@ public static class SourceGeneratorAcquisitionService
                 sourcesDir, manifest, allGeneratedPaths, argsDict, acquiredReferences, assemblyName);
             if (validationCompilation == null)
             {
-                return Finish();
+                return Done(Finish());
             }
 
             // Try each candidate dll, first with no analyzer options, then with options inferred
@@ -209,7 +233,7 @@ public static class SourceGeneratorAcquisitionService
                 optionSets.Add(inferredOptions);
             }
 
-            var attached = false;
+            var attachedThisGenerator = false;
             foreach (var candidateDir in candidateDirs)
             {
                 var dllPath = Path.Combine(candidateDir, generatorAssembly + ".dll");
@@ -233,16 +257,17 @@ public static class SourceGeneratorAcquisitionService
                         plan.GeneratedLocalPaths.Add(doc.LocalPath);
                     }
                     AnsiConsole.MarkupLine($"  [green]✓[/] {generatorAssembly} regenerates all {docs.Count} document(s) byte-for-byte - attaching as analyzer");
-                    attached = true;
+                    attached[generatorAssembly] = Path.GetFileName(candidateDir);
+                    attachedThisGenerator = true;
                     break;
                 }
-                if (attached)
+                if (attachedThisGenerator)
                 {
                     break;
                 }
             }
 
-            if (!attached)
+            if (!attachedThisGenerator)
             {
                 AnsiConsole.MarkupLine($"  [yellow]⚠[/] Generator {generatorAssembly} output does not match the original - keeping plain sources");
                 anyFailed = true;
@@ -255,10 +280,10 @@ public static class SourceGeneratorAcquisitionService
         if (anyFailed && plan.AnalyzerFileNames.Count > 0)
         {
             AnsiConsole.MarkupLine("  [yellow]⚠[/] Not all generators could be matched - keeping plain sources for all of them");
-            return null;
+            return Done(null);
         }
 
-        return Finish();
+        return Done(Finish());
     }
 
     private static readonly HttpClient Http = new();

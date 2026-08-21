@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Basic.CompilerLog.Util;
 using NuGetToCompLog.Abstractions;
 using NuGetToCompLog.Services;
+using NuGetToCompLog.Services.Reconstruction;
 using NuGetToCompLog.Services.Verify;
 
 namespace NuGetToCompLog.Commands;
@@ -40,7 +41,8 @@ public class VerifyCommandHandler
             result.WorkingDirectory,
             result.WorkingDirectory,
             result.SelectedTfm,
-            result.SelectedAssemblies);
+            result.SelectedAssemblies,
+            result.Ledger);
 
         if (!File.Exists(complogPath))
         {
@@ -123,11 +125,26 @@ public class VerifyCommandHandler
         _console.WriteLine();
         _console.MarkupLine($"[yellow]Rebuilding from complog[/]");
         _console.MarkupLine($"  [dim]Compiler: {cscPath}[/]");
-        if (compilerVersion != null && CompilerVersionReader.TryGetInformationalVersion(cscPath) is { } actualVersion &&
-            !string.Equals(actualVersion, compilerVersion, StringComparison.OrdinalIgnoreCase))
+        // The complog was built before a compiler was chosen, so its ledger entry was a
+        // prediction; this is what the rebuild actually ran.
+        if (compilerVersion != null)
         {
-            _console.MarkupLine($"  [yellow]⚠[/] Exact compiler {compilerVersion.Split('+')[0]} is not installed; " +
-                                $"using {actualVersion.Split('+')[0]} - a byte-for-byte match is unlikely");
+            var actual = CompilerVersionReader.TryGetInformationalVersion(cscPath);
+            if (actual != null && !string.Equals(actual, compilerVersion, StringComparison.OrdinalIgnoreCase))
+            {
+                _console.MarkupLine($"  [yellow]⚠[/] Exact compiler {compilerVersion.Split('+')[0]} is not installed; " +
+                                    $"using {actual.Split('+')[0]} - a byte-for-byte match is unlikely");
+                result.Ledger.Replace(ReconstructionLedger.CategoryCompiler, compilerVersion.Split('+')[0],
+                    InputEvidence.Assumed,
+                    $"rebuilt with {actual.Split('+')[0]} instead - codegen and generated-document " +
+                    "checksums differ between compiler versions");
+            }
+            else
+            {
+                result.Ledger.Replace(ReconstructionLedger.CategoryCompiler, compilerVersion.Split('+')[0],
+                    InputEvidence.Proven,
+                    "the exact compiler recorded in the PDB, verified by its informational version");
+            }
         }
 
         // The PDB's compilation options record the runtime that hosted the original compiler
@@ -139,7 +156,18 @@ public class VerifyCommandHandler
         {
             _console.MarkupLine($"  [yellow]⚠[/] Runtime {runtimeVersion.Split('+')[0]} that hosted the original compiler " +
                                 "is not installed; the PDB compilation-options blob will differ");
+            result.Ledger.Replace(ReconstructionLedger.CategoryCompiler, "runtime", InputEvidence.Assumed,
+                $"the runtime {runtimeVersion.Split('+')[0]} that hosted the original compiler is not " +
+                "installed, and it is recorded in the compilation-options blob");
         }
+        else if (runtimeVersion != null)
+        {
+            result.Ledger.Replace(ReconstructionLedger.CategoryCompiler, "runtime", InputEvidence.Proven,
+                $"csc hosted on {runtimeVersion.Split('+')[0]}, the runtime recorded in the options blob");
+        }
+
+        var ledgerPath = Path.Combine(result.WorkingDirectory, $"{packageId}.{result.Package.Version}.reconstruction.json");
+        await result.Ledger.SaveAsync(ledgerPath);
 
         var (exitCode, output) = await RunCscAsync(cscPath, fxVersion, exportDir, cancellationToken);
         if (exitCode != 0)

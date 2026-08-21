@@ -4,6 +4,7 @@ using NuGet.Frameworks;
 using NuGet.Protocol;
 using NuGet.Protocol.Core.Types;
 using NuGet.Versioning;
+using NuGetToCompLog.Services.Reconstruction;
 using Spectre.Console;
 using System.Runtime.InteropServices;
 using System.Xml.Linq;
@@ -23,10 +24,12 @@ public class ReferenceAssemblyAcquisitionService
     private readonly HashSet<string> _acquiredPackages = [];
     private readonly Dictionary<string, string> _frameworkToPackageMap = new();
     private readonly string _workingDirectory;
-    
-    public ReferenceAssemblyAcquisitionService(string workingDirectory)
+    private readonly ReconstructionLedger? _ledger;
+
+    public ReferenceAssemblyAcquisitionService(string workingDirectory, ReconstructionLedger? ledger = null)
     {
         _workingDirectory = workingDirectory;
+        _ledger = ledger;
         InitializeFrameworkPackageMap();
     }
 
@@ -285,8 +288,70 @@ public class ReferenceAssemblyAcquisitionService
             }
         }
 
+        RecordReferenceEvidence(references, acquiredReferences);
+
         AnsiConsole.MarkupLine($"[green]✓[/] Acquired {acquiredReferences.Count} reference assemblies");
         return acquiredReferences;
+    }
+
+    /// <summary>
+    /// Records what each recorded reference was resolved to, judged by MVID rather than by which
+    /// probe found it. The PDB stores only a file name, so a same-named assembly from another
+    /// package version or targeting pack compiles fine and yields a different metadata-references
+    /// blob in the rebuilt PDB - which is a substitution, not a match, and the ledger says so.
+    /// </summary>
+    private void RecordReferenceEvidence(
+        List<MetadataReference> references,
+        Dictionary<string, string> acquiredReferences)
+    {
+        if (_ledger == null)
+        {
+            return;
+        }
+
+        var proven = 0;
+        var unverifiable = 0;
+        var problems = new List<(InputEvidence Evidence, string Name, string Detail)>();
+
+        foreach (var reference in references)
+        {
+            var fileName = Path.GetFileName(reference.FileName);
+            if (!acquiredReferences.TryGetValue(fileName, out var path))
+            {
+                problems.Add((InputEvidence.Missing, fileName,
+                    "recorded by the PDB but found in no targeting pack, package or sibling assembly"));
+                continue;
+            }
+
+            if (reference.Mvid == Guid.Empty)
+            {
+                unverifiable++;
+            }
+            else if (TryReadMvid(path) == reference.Mvid)
+            {
+                proven++;
+            }
+            else
+            {
+                problems.Add((InputEvidence.Substituted, fileName,
+                    "a same-named assembly with a different MVID - not the build the original compiled against"));
+            }
+        }
+
+        _ledger.Proven(ReconstructionLedger.CategoryReference, "matched by recorded MVID",
+            "the assembly the original compiler used, confirmed byte-identical by module id", proven);
+        _ledger.Assumed(ReconstructionLedger.CategoryReference, "no MVID recorded",
+            "resolved by file name; the PDB recorded no module id to confirm it against", unverifiable);
+
+        foreach (var (evidence, name, detail) in problems.Take(20))
+        {
+            _ledger.Add(ReconstructionLedger.CategoryReference, name, evidence, detail);
+        }
+        foreach (var group in problems.Skip(20).GroupBy(p => p.Evidence))
+        {
+            _ledger.Add(ReconstructionLedger.CategoryReference, $"{group.Count()} further reference(s)",
+                group.Key, group.First().Detail, group.Count());
+        }
     }
 
     /// <summary>

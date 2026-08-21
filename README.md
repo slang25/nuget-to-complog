@@ -70,6 +70,52 @@ To make rebuilds faithful, the tool:
 - reconstructs strong naming: `/publicsign` from the assembly's public key, or full signing
   when the repo commits its `.snk` (RSA signing is deterministic)
 
+### What the package didn't record
+
+A NuGet package is not a self-describing build. The PDB records the compiler version, the
+options blob, the references and most sources — but nothing records the analyzer set, the
+source generator package versions (they are `PrivateAssets`, so the nuspec never sees them),
+or flags like `/features:` and `/nowarn:`. So this tool does not *extract* a complog from a
+package; it **reconstructs** one, filling those gaps by inference.
+
+Every run writes a `{package}.{version}.reconstruction.json` next to the complog saying where
+each input came from, and prints a summary:
+
+```
+Reconstruction ledger
+     13  recorded     read from the package and verified
+      2  derived      computed from recorded data
+      1  inferred     recovered from evidence in the shipped assembly
+    153  proven       searched for, then confirmed against the package
+      1  substituted  knowingly not the original input
+    104  missing      needed and not recovered
+  ⚠ Some inputs are knowingly not the original - the rebuild will compile but cannot match:
+    • source ByteString.cs: neither embedded in the PDB nor available from Source Link
+    • signing /publicsign: the assembly is fully signed but no matching .snk was found ...
+```
+
+The distinctions are the point:
+
+| | meaning |
+|---|---|
+| `recorded` | read from the package and verified — source bytes that hash to the PDB's checksum |
+| `derived` | computed from recorded data, like the `/pathmap` root |
+| `inferred` | never stated, but implied by the shipped assembly (`/features:nullablePublicOnly`) |
+| `proven` | searched for among candidates, then confirmed — a reference matched by MVID |
+| `assumed` | a guess nothing could confirm. Might be right; not claimed |
+| `substituted` | knowingly not the original — decompiled source, a stand-in assembly |
+| `missing` | needed by the compilation and not recovered |
+
+The last three are what stop a rebuild being a faithful replay, and the ledger's verdict says
+which: `exact` (everything accounted for), `unconfirmed` (only guesses in the way), or
+`impossible` (something is knowingly not the original). A complog whose ledger says `exact`
+should rebuild byte-for-byte; one that says `impossible` will compile but cannot match, and
+now says so before you run the build rather than after.
+
+The file carries no timestamps or machine paths and its entries are emitted in a fixed order,
+so the same package always produces the same ledger — commit one and a diff shows exactly how
+reconstruction quality changed.
+
 ### Building from source
 
 ```bash
@@ -93,7 +139,7 @@ Not all packages include the necessary information. For a CompLog to be created 
 - Portable PDB files (not Windows PDB format)
 - Embedded or available symbols
 
-Most modern packages meet these requirements, but older packages or packages not built with SDK-style projects may not. The tool handles this gracefully—if information can't be found, it will tell you why.
+Most modern packages meet these requirements, but older packages or packages not built with SDK-style projects may not. The tool handles this gracefully—if information can't be found, it will tell you why, and the reconstruction ledger records every gap it had to fill.
 
 ## What you get
 

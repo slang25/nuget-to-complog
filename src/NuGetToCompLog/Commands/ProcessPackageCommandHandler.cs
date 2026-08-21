@@ -59,7 +59,8 @@ public class ProcessPackageCommandHandler
                 result.WorkingDirectory,
                 Directory.GetCurrentDirectory(),
                 result.SelectedTfm,
-                result.SelectedAssemblies);
+                result.SelectedAssemblies,
+                result.Ledger);
 
             if (!File.Exists(complogFilePath))
             {
