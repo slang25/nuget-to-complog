@@ -70,7 +70,7 @@ public class CompilerToolsetService
                 }
 
                 stream.Position = 0;
-                ExtractNetCoreCompiler(stream, cacheDir);
+                ExtractNetCoreCompiler(stream, cacheDir, cscPath);
                 if (File.Exists(cscPath))
                 {
                     _console.MarkupLine($"  [green]✓[/] Downloaded {PackageId} {version} from {new Uri(feed).Host}");
@@ -86,35 +86,69 @@ public class CompilerToolsetService
         return null;
     }
 
-    private static void ExtractNetCoreCompiler(Stream nupkg, string cacheDir)
+    private static void ExtractNetCoreCompiler(Stream nupkg, string cacheDir, string cscPath)
     {
-        // Extract to a sibling temp dir and move into place so a cancelled download can never
-        // leave a half-populated cache entry that later runs would trust.
-        var tempDir = cacheDir + ".tmp";
-        if (Directory.Exists(tempDir))
+        // Extract to a caller-unique sibling directory and move it into place, so a cancelled
+        // download can never leave a half-populated cache entry that later runs would trust.
+        // The name must be unique: `verify --fetch-compiler` runs concurrently across packages,
+        // and a shared ".tmp" path would let one process delete another's in-progress
+        // extraction. The install is a single Move onto a never-deleted destination, so a
+        // process that loses the race keeps reading a cache entry that stays intact.
+        var tempDir = $"{cacheDir}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        try
         {
-            Directory.Delete(tempDir, recursive: true);
-        }
-
-        using var archive = new ZipArchive(nupkg, ZipArchiveMode.Read);
-        foreach (var entry in archive.Entries)
-        {
-            if (!entry.FullName.StartsWith("tasks/netcore/", StringComparison.OrdinalIgnoreCase) ||
-                entry.FullName.EndsWith("/", StringComparison.Ordinal))
+            using (var archive = new ZipArchive(nupkg, ZipArchiveMode.Read))
             {
-                continue;
+                foreach (var entry in archive.Entries)
+                {
+                    if (!entry.FullName.StartsWith("tasks/netcore/", StringComparison.OrdinalIgnoreCase) ||
+                        entry.FullName.EndsWith("/", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var destination = Path.Combine(tempDir, entry.FullName.Replace('/', Path.DirectorySeparatorChar));
+                    Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                    entry.ExtractToFile(destination, overwrite: true);
+                }
             }
 
-            var destination = Path.Combine(tempDir, entry.FullName.Replace('/', Path.DirectorySeparatorChar));
-            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            entry.ExtractToFile(destination, overwrite: true);
-        }
+            if (!File.Exists(Path.Combine(tempDir, "tasks", "netcore", "bincore", "csc.dll")))
+            {
+                // Not the layout we need - don't publish it, so an installed cache entry always
+                // means a usable csc.dll and "destination exists" always means "already valid".
+                return;
+            }
 
-        if (Directory.Exists(cacheDir))
-        {
-            Directory.Delete(cacheDir, recursive: true);
+            if (Directory.Exists(cacheDir))
+            {
+                // Another process installed this version while we were extracting; its cache
+                // entry is as good as ours, so discard the extraction rather than replace it.
+                return;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(cacheDir)!);
+            try
+            {
+                Directory.Move(tempDir, cacheDir);
+            }
+            catch (IOException) when (Directory.Exists(cacheDir))
+            {
+                // Lost the race between the check above and the move; the winner's entry stands.
+            }
         }
-        Directory.CreateDirectory(Path.GetDirectoryName(cacheDir)!);
-        Directory.Move(tempDir, cacheDir);
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try
+                {
+                    Directory.Delete(tempDir, recursive: true);
+                }
+                catch (IOException)
+                {
+                }
+            }
+        }
     }
 }

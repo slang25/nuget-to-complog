@@ -69,17 +69,18 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
             // No SourceLink mappings, check if we should decompile missing files
             if (nonEmbeddedFiles.Count > 0 && assemblyPath != null && _decompiler != null)
             {
-                var missingFiles = nonEmbeddedFiles.Select(sf => sf.Path).ToList();
+                _console.MarkupLine($"  [yellow]⚠[/] {nonEmbeddedFiles.Count} source files not available via SourceLink");
                 var decompiledCount = await _decompiler.DecompileMissingFilesAsync(
                     assemblyPath,
-                    missingFiles,
+                    nonEmbeddedFiles,
                     pdbMetadataReader,
                     destinationDirectory,
+                    // No SourceLink mappings at all: nothing else will define these types.
+                    allDocumentsMissing: true,
                     cancellationToken);
-                
+
                 if (decompiledCount > 0)
                 {
-                    _console.MarkupLine($"  [yellow]⚠[/] {missingFiles.Count} source files not available via SourceLink");
                     _console.MarkupLine($"  [cyan]→[/] Decompiled {decompiledCount} missing file(s) from assembly");
                 }
                 
@@ -179,11 +180,13 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
             {
                 _console.MarkupLine($"  [cyan]→[/] Attempting to decompile {actuallyMissing.Count} missing file(s) from assembly...");
                 
+                var missingSet = actuallyMissing.ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var decompiledCount = await _decompiler.DecompileMissingFilesAsync(
                     assemblyPath,
-                    actuallyMissing,
+                    nonEmbeddedFiles.Where(sf => missingSet.Contains(sf.Path)).ToList(),
                     pdbMetadataReader,
                     destinationDirectory,
+                    allDocumentsMissing: missingSet.Count == nonEmbeddedFiles.Count,
                     cancellationToken);
                 
                 if (decompiledCount > 0)

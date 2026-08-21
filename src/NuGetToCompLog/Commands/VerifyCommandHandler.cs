@@ -78,9 +78,27 @@ public class VerifyCommandHandler
         // Export the complog to a build-able directory. Everything from here on uses only the
         // complog contents - this is what proves the complog alone reproduces the assembly.
         var exportDir = Path.Combine(result.WorkingDirectory, "verify-export");
+        // A package can ship several assemblies (NUnit: nunit.framework + nunit.framework.legacy),
+        // giving the complog one compilation each. Export the one that actually built the
+        // assembly being compared, or the comparison reports one assembly's bytes against
+        // another's and every difference is meaningless.
+        var originalAssembly = result.SelectedAssemblies.First();
         using (var reader = CompilerLogReader.Create(complogPath))
         {
-            var compilerCall = reader.ReadAllCompilerCalls().First();
+            var compilerCalls = reader.ReadAllCompilerCalls();
+            var assemblyName = Path.GetFileNameWithoutExtension(originalAssembly);
+            var compilerCall = compilerCalls.FirstOrDefault(c =>
+                    string.Equals(Path.GetFileNameWithoutExtension(c.ProjectFileName), assemblyName,
+                        StringComparison.OrdinalIgnoreCase))
+                ?? compilerCalls.First();
+
+            if (compilerCalls.Count > 1)
+            {
+                _console.MarkupLine(
+                    $"  [dim]Package builds {compilerCalls.Count} assemblies; verifying " +
+                    $"{Path.GetFileName(originalAssembly)}[/]");
+            }
+
             var compilerDir = Path.GetDirectoryName(cscPath)!;
             new ExportUtil(reader).Export(compilerCall, exportDir, [(compilerDir, "verify")]);
         }
@@ -134,7 +152,7 @@ public class VerifyCommandHandler
             return 1;
         }
 
-        return Compare(result.SelectedAssemblies.First(), result.WorkingDirectory, result.SelectedTfm, exportDir, rspPath);
+        return Compare(originalAssembly, result.WorkingDirectory, result.SelectedTfm, exportDir, rspPath);
     }
 
     private int Compare(string originalAssembly, string workingDirectory, string? tfm, string exportDir, string rspPath)
@@ -204,10 +222,21 @@ public class VerifyCommandHandler
 
         if (pdbResult != null && !pdbResult.ExactMatch)
         {
-            _console.MarkupLine("[yellow]PDB differences:[/]");
-            foreach (var finding in pdbResult.RealDifferences.Where(f => !f.StartsWith("bytes differ")).Take(10))
+            // Raw byte clusters say nothing actionable about a PDB, so only the explained
+            // findings are listed - but say so rather than printing an empty section, which
+            // reads as "the PDB matched".
+            var findings = pdbResult.RealDifferences.Where(f => !f.StartsWith("bytes differ")).Take(10).ToList();
+            if (findings.Count > 0)
             {
-                _console.MarkupLine($"  [dim]• {finding}[/]");
+                _console.MarkupLine("[yellow]PDB differences:[/]");
+                foreach (var finding in findings)
+                {
+                    _console.MarkupLine($"  [dim]• {finding}[/]");
+                }
+            }
+            else
+            {
+                _console.MarkupLine("[yellow]PDB differs[/] [dim]- no attributable cause found[/]");
             }
         }
 

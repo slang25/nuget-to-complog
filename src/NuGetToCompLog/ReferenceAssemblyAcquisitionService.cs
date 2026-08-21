@@ -41,6 +41,7 @@ public class ReferenceAssemblyAcquisitionService
         _frameworkToPackageMap["net7.0"] = "Microsoft.NETCore.App.Ref/7.0.0";
         _frameworkToPackageMap["net8.0"] = "Microsoft.NETCore.App.Ref/8.0.0";
         _frameworkToPackageMap["net9.0"] = "Microsoft.NETCore.App.Ref/9.0.0";
+        _frameworkToPackageMap["net10.0"] = "Microsoft.NETCore.App.Ref/10.0.0";
         
         // .NET Standard 2.x - use NETStandard.Library.Ref
         _frameworkToPackageMap["netstandard2.0"] = "NETStandard.Library.Ref/2.1.0";
@@ -106,10 +107,21 @@ public class ReferenceAssemblyAcquisitionService
         AnsiConsole.MarkupLine($"  [cyan]NuGet package references:[/] {nugetRefs.Count}");
         AnsiConsole.WriteLine();
 
+        // The two shared frameworks are separate packs, and each is probed by reading one of
+        // its own assemblies - so they have to be acquired from their own reference lists.
+        var aspNetRefs = frameworkRefs.Where(r => IsAspNetCoreFrameworkAssembly(r.FileName)).ToList();
+        var baseRefs = frameworkRefs.Where(r => !IsAspNetCoreFrameworkAssembly(r.FileName)).ToList();
+
         var frameworkPaths = new Dictionary<string, string>();
-        if (frameworkRefs.Count > 0 && !string.IsNullOrEmpty(targetFramework))
+        if (baseRefs.Count > 0 && !string.IsNullOrEmpty(targetFramework))
         {
-            frameworkPaths = await AcquireFrameworkReferencesAsync(targetFramework, frameworkRefs);
+            frameworkPaths = await AcquireFrameworkReferencesAsync(targetFramework, baseRefs);
+        }
+
+        if (aspNetRefs.Count > 0 && !string.IsNullOrEmpty(targetFramework))
+        {
+            var aspNetPaths = await AcquireAspNetCoreReferencesAsync(targetFramework, aspNetRefs);
+            MergeRefPack(frameworkPaths, aspNetPaths, references);
         }
 
         var nugetPaths = new Dictionary<string, string>();
@@ -195,6 +207,11 @@ public class ReferenceAssemblyAcquisitionService
                     Path.GetFileNameWithoutExtension(fileName), fileName, reference.Mvid, targetFramework);
             }
 
+            // Multi-assembly packages (e.g. NUnit ships nunit.framework.dll alongside
+            // nunit.framework.legacy.dll) reference their own siblings, which are not on
+            // nuget.org under the assembly's name - they are already extracted right here.
+            exactPath ??= TryFindSiblingAssemblyInPackage(fileName, reference.Mvid, targetFramework);
+
             if (exactPath != null)
             {
                 acquiredReferences[fileName] = exactPath;
@@ -229,6 +246,49 @@ public class ReferenceAssemblyAcquisitionService
 
         AnsiConsole.MarkupLine($"[green]✓[/] Acquired {acquiredReferences.Count} reference assemblies");
         return acquiredReferences;
+    }
+
+    /// <summary>
+    /// Finds a recorded reference among the assemblies extracted from the package under
+    /// analysis. A package that ships several assemblies has them reference each other, and
+    /// those references resolve from nowhere else. The target framework's own directory is
+    /// preferred, and a recorded MVID must match - otherwise a same-named assembly from a
+    /// different TFM would be silently substituted.
+    /// </summary>
+    private string? TryFindSiblingAssemblyInPackage(string fileName, Guid mvid, string? targetFramework)
+    {
+        var extracted = Path.Combine(_workingDirectory, "extracted");
+        if (!Directory.Exists(extracted))
+        {
+            return null;
+        }
+
+        var candidates = Directory.GetFiles(extracted, fileName, SearchOption.AllDirectories)
+            .OrderByDescending(path =>
+                !string.IsNullOrEmpty(targetFramework) &&
+                string.Equals(Path.GetFileName(Path.GetDirectoryName(path)), targetFramework,
+                    StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var candidate in candidates.Where(c => mvid == Guid.Empty || TryReadMvid(c) == mvid))
+        {
+            AnsiConsole.MarkupLine($"  [green]✓[/] {fileName} resolved from the package's own assemblies");
+            return candidate;
+        }
+
+        // No MVID match: the sibling was almost certainly compiled against the *reference*
+        // assembly, which the package does not ship. The implementation assembly has the same
+        // public surface, so it compiles - and the substitution still surfaces in the MVID
+        // mismatch report rather than being hidden.
+        if (candidates.Count > 0)
+        {
+            AnsiConsole.MarkupLine(
+                $"  [yellow]⚠[/] {fileName} resolved from the package's own assemblies (MVID differs - " +
+                "the original was built against its reference assembly)");
+            return candidates[0];
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -436,13 +496,82 @@ public class ReferenceAssemblyAcquisitionService
     }
 
     /// <summary>
+    /// Acquires ASP.NET Core shared-framework assemblies from Microsoft.AspNetCore.App.Ref,
+    /// which has the same ref/&lt;tfm&gt;/ layout as the base targeting pack: the installed pack
+    /// whose MVIDs match the PDB is preferred, otherwise the exact version is located on
+    /// nuget.org. The pack also carries the Microsoft.Extensions.* assemblies that ship in the
+    /// shared framework; those are returned too, and the caller's MVID comparison decides
+    /// between them and the same-named standalone NuGet packages.
+    /// </summary>
+    private async Task<Dictionary<string, string>> AcquireAspNetCoreReferencesAsync(
+        string targetFramework,
+        List<MetadataReference> aspNetRefs)
+    {
+        const string packId = "Microsoft.AspNetCore.App.Ref";
+
+        var sdkResult = await TryAcquireFromLocalSdkAsync(targetFramework, aspNetRefs, [packId]);
+        if (sdkResult.Count > 0 && FrameworkRefsMatchByMvid(sdkResult, aspNetRefs))
+        {
+            AnsiConsole.MarkupLine($"    [green]✓[/] {packId} from local SDK ({sdkResult.Count} assemblies)");
+            return sdkResult;
+        }
+
+        if (aspNetRefs.Any(r => r.Mvid != Guid.Empty))
+        {
+            var exact = await TryAcquireExactRefPackFromNuGetAsync(targetFramework, aspNetRefs, packId);
+            if (exact.Count > 0)
+            {
+                return exact;
+            }
+        }
+
+        if (sdkResult.Count > 0)
+        {
+            AnsiConsole.MarkupLine($"  [yellow]⚠[/] Using local SDK {packId} (exact version not found)");
+            return sdkResult;
+        }
+
+        AnsiConsole.MarkupLine($"  [yellow]⚠[/] Could not acquire {packId} for {targetFramework}");
+        return sdkResult;
+    }
+
+    /// <summary>
+    /// Folds one reference pack's assemblies into another's. A name the target lacks is added
+    /// outright; where both packs carry it, the one matching the PDB-recorded MVID wins, so a
+    /// shared-framework assembly is never shadowed by a same-named one from the other pack.
+    /// </summary>
+    private static void MergeRefPack(
+        Dictionary<string, string> target,
+        Dictionary<string, string> addition,
+        List<MetadataReference> references)
+    {
+        foreach (var (fileName, path) in addition)
+        {
+            if (!target.TryGetValue(fileName, out var existing))
+            {
+                target[fileName] = path;
+                continue;
+            }
+
+            var recorded = references
+                .FirstOrDefault(r => string.Equals(Path.GetFileName(r.FileName), fileName,
+                    StringComparison.OrdinalIgnoreCase))?.Mvid ?? Guid.Empty;
+            if (recorded != Guid.Empty && TryReadMvid(existing) != recorded && TryReadMvid(path) == recorded)
+            {
+                target[fileName] = path;
+            }
+        }
+    }
+
+    /// <summary>
     /// Fallback: Try to acquire framework assemblies from the local .NET SDK. When the PDB
     /// recorded reference MVIDs, the installed targeting pack version that actually matches
     /// them is preferred over simply the newest.
     /// </summary>
     private async Task<Dictionary<string, string>> TryAcquireFromLocalSdkAsync(
         string targetFramework,
-        List<MetadataReference> frameworkRefs)
+        List<MetadataReference> frameworkRefs,
+        string[]? packNamesOverride = null)
     {
         var result = new Dictionary<string, string>();
 
@@ -458,9 +587,9 @@ public class ReferenceAssemblyAcquisitionService
             return result;
         }
 
-        var packNames = targetFramework.StartsWith("netstandard")
+        var packNames = packNamesOverride ?? (targetFramework.StartsWith("netstandard")
             ? new[] { "Microsoft.NETCore.App.Ref", "NETStandard.Library.Ref" }
-            : ["Microsoft.NETCore.App.Ref"];
+            : ["Microsoft.NETCore.App.Ref"]);
 
         var candidateDirs = packNames
             .Select(name => Path.Combine(packsDir, name))
@@ -528,15 +657,24 @@ public class ReferenceAssemblyAcquisitionService
     /// </summary>
     private async Task<Dictionary<string, string>> TryAcquireExactRefPackFromNuGetAsync(
         string targetFramework,
-        List<MetadataReference> frameworkRefs)
+        List<MetadataReference> frameworkRefs,
+        string? packageIdOverride = null)
     {
         var result = new Dictionary<string, string>();
 
-        if (!_frameworkToPackageMap.TryGetValue(targetFramework, out var packageInfo))
+        string packageId;
+        if (packageIdOverride != null)
+        {
+            packageId = packageIdOverride;
+        }
+        else if (_frameworkToPackageMap.TryGetValue(targetFramework, out var packageInfo))
+        {
+            packageId = packageInfo.Split('/')[0];
+        }
+        else
         {
             return result;
         }
-        var packageId = packageInfo.Split('/')[0];
 
         var probe = frameworkRefs.FirstOrDefault(r => r.Mvid != Guid.Empty);
         if (probe == null)
@@ -1154,8 +1292,19 @@ public class ReferenceAssemblyAcquisitionService
             return true;
         }
 
-        return false;
+        // Microsoft.AspNetCore.* ships in the ASP.NET Core shared framework, not on nuget.org.
+        // Treating these as package references makes acquisition chase hundreds of transitive
+        // packages and still miss the shared-framework-only ones.
+        return IsAspNetCoreFrameworkAssembly(fileName);
     }
+
+    /// <summary>
+    /// Whether the assembly comes from the ASP.NET Core shared framework
+    /// (Microsoft.AspNetCore.App.Ref) rather than a standalone package.
+    /// </summary>
+    private static bool IsAspNetCoreFrameworkAssembly(string fileName) =>
+        Path.GetFileNameWithoutExtension(fileName)
+            .StartsWith("Microsoft.AspNetCore.", StringComparison.OrdinalIgnoreCase);
 
     private bool IsNuGetPackageReference(string fileName)
     {

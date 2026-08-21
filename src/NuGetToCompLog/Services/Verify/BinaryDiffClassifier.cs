@@ -60,10 +60,12 @@ public static class BinaryDiffClassifier
         // Authenticode signatures are applied to the finished binary (appended at the end of
         // the file); a rebuild can never reproduce one without the publisher's key. Splice
         // them out and report them rather than presenting the tail as opaque content drift.
+        var spliced = new List<string>();
         var originalCert = FindCertificateSpan(original);
         var rebuiltCert = FindCertificateSpan(rebuilt);
         if (originalCert != null || rebuiltCert != null)
         {
+            spliced.Add("the Authenticode signature");
             derivedDiffs.Add($"Authenticode signature (original {originalCert?.Length ?? 0:N0} bytes, " +
                              $"rebuilt {rebuiltCert?.Length ?? 0:N0} bytes) - applied after compilation, " +
                              "not reproducible without the publisher's key");
@@ -82,7 +84,6 @@ public static class BinaryDiffClassifier
         // The embedded portable PDB blob is assembly content, but like an external PDB it
         // drifts for its own reasons (and its size shifts everything after it). Splice it out
         // of both files, report it as its own difference, and classify the rest.
-        var pdbSpliced = false;
         var originalPdbSpan = FindEmbeddedPdbSpan(original);
         var rebuiltPdbSpan = FindEmbeddedPdbSpan(rebuilt);
         if (originalPdbSpan is { } os && rebuiltPdbSpan is { } rs &&
@@ -108,12 +109,17 @@ public static class BinaryDiffClassifier
             }
             maskedOriginal = Splice(maskedOriginal, os);
             maskedRebuilt = Splice(maskedRebuilt, rs);
-            pdbSpliced = true;
+            spliced.Add("the embedded PDB");
         }
 
         if (maskedOriginal.Length != maskedRebuilt.Length)
         {
-            var what = pdbSpliced ? "content sizes differ after removing the embedded PDB" : "file sizes differ";
+            // Name what was removed: a signed original is ~10KB larger on disk than its own
+            // content, so reporting these as raw "file sizes" makes a small content delta look
+            // like a large one.
+            var what = spliced.Count == 0
+                ? "file sizes differ"
+                : $"content sizes differ after removing {string.Join(" and ", spliced)}";
             return new ComparisonResult(false, false, derivedDiffs,
                 [$"{what}: original {maskedOriginal.Length:N0} bytes, rebuilt {maskedRebuilt.Length:N0} bytes"]);
         }
@@ -244,45 +250,70 @@ public static class BinaryDiffClassifier
     }
 
     /// <summary>
-    /// PE fields that shift when the embedded PDB blob changes size: the optional header's
-    /// size fields and entry point, the import table / IAT directory entries (the import stub
-    /// is laid out right after the debug data), each section header's VirtualSize /
-    /// SizeOfRawData, and the .reloc section (whose only fixup targets the import stub).
+    /// PE fields that shift when the embedded PDB blob changes size. Beyond the optional
+    /// header's size fields and entry point, a size change that crosses a section- or
+    /// file-alignment boundary relocates every section laid out after .text, so this covers
+    /// the whole of each section header's location (VirtualSize / VirtualAddress /
+    /// SizeOfRawData / PointerToRawData), the data directories that point at those sections
+    /// (import table / IAT, resources, base relocations, debug), the RVAs the resource
+    /// directory stores for its own data, and the .reloc section (whose only fixup targets
+    /// the import stub).
     /// </summary>
     private static List<(int Start, int Length)> GetLayoutDerivedRegions(byte[] file)
     {
         var regions = new List<(int, int)>();
+        void Add(int start, int length)
+        {
+            if (start >= 0 && length > 0 && start + length <= file.Length)
+            {
+                regions.Add((start, length));
+            }
+        }
+
         try
         {
             using var peReader = new PEReader(System.Collections.Immutable.ImmutableArray.Create(file));
             var headers = peReader.PEHeaders;
             var optionalHeaderStart = headers.CoffHeaderStartOffset + 20;
-            regions.Add((optionalHeaderStart + 4, 8));   // SizeOfCode + SizeOfInitializedData
-            regions.Add((optionalHeaderStart + 16, 4));  // AddressOfEntryPoint
-            regions.Add((optionalHeaderStart + 56, 4));  // SizeOfImage
+            Add(optionalHeaderStart + 4, 8);   // SizeOfCode + SizeOfInitializedData
+            Add(optionalHeaderStart + 16, 4);  // AddressOfEntryPoint
+            Add(optionalHeaderStart + 56, 4);  // SizeOfImage
+            if (headers.PEHeader!.Magic == PEMagic.PE32)
+            {
+                // BaseOfData (PE32 only) is the RVA of the first section after .text.
+                Add(optionalHeaderStart + 24, 4);
+            }
 
             var dataDirectoriesStart = optionalHeaderStart +
-                (headers.PEHeader!.Magic == PEMagic.PE32 ? 96 : 112);
-            regions.Add((dataDirectoriesStart + 1 * 8, 8));   // ImportTable
-            regions.Add((dataDirectoriesStart + 12 * 8, 8));  // IAT
+                (headers.PEHeader.Magic == PEMagic.PE32 ? 96 : 112);
+            // Every directory entry that addresses relocatable content: the import table (laid
+            // out right after the debug data), the IAT, and the resource / base-relocation /
+            // debug directories, which move wholesale when their section shifts.
+            foreach (var directory in (int[])[1, 2, 5, 6, 12])
+            {
+                Add(dataDirectoriesStart + directory * 8, 8);
+            }
 
             // The IAT data itself (at the start of .text) holds a thunk RVA into the import
             // table, which sits after the debug data and therefore shifts too.
             if (headers.TryGetDirectoryOffset(headers.PEHeader.ImportAddressTableDirectory, out var iatOffset))
             {
-                regions.Add((iatOffset, headers.PEHeader.ImportAddressTableDirectory.Size));
+                Add(iatOffset, headers.PEHeader.ImportAddressTableDirectory.Size);
             }
 
             var sectionHeadersStart = optionalHeaderStart + headers.CoffHeader.SizeOfOptionalHeader;
             for (var i = 0; i < headers.SectionHeaders.Length; i++)
             {
-                regions.Add((sectionHeadersStart + i * 40 + 8, 4));   // VirtualSize
-                regions.Add((sectionHeadersStart + i * 40 + 16, 4));  // SizeOfRawData
+                // VirtualSize, VirtualAddress, SizeOfRawData and PointerToRawData are four
+                // consecutive uint32s starting at offset 8 of the 40-byte section header.
+                Add(sectionHeadersStart + i * 40 + 8, 16);
                 if (headers.SectionHeaders[i].Name == ".reloc")
                 {
-                    regions.Add((headers.SectionHeaders[i].PointerToRawData, headers.SectionHeaders[i].SizeOfRawData));
+                    Add(headers.SectionHeaders[i].PointerToRawData, headers.SectionHeaders[i].SizeOfRawData);
                 }
             }
+
+            AddResourceDataRvas(file, headers, Add);
 
             // FieldRVA rows point at mapped static data (e.g. array initializers), which the
             // compiler lays out after the debug data - those RVAs shift with the blob too.
@@ -295,7 +326,7 @@ public static class BinaryDiffClassifier
                 var rowSize = metadataReader.GetTableRowSize(TableIndex.FieldRva);
                 for (var row = 0; row < fieldRvaRows; row++)
                 {
-                    regions.Add((tableStart + row * rowSize, 4));
+                    Add(tableStart + row * rowSize, 4);
                 }
             }
         }
@@ -303,6 +334,63 @@ public static class BinaryDiffClassifier
         {
         }
         return regions;
+    }
+
+    /// <summary>
+    /// Win32 resources (the version block the SDK emits by default) address their own payloads
+    /// by RVA, so when .rsrc relocates every IMAGE_RESOURCE_DATA_ENTRY.OffsetToData changes
+    /// while the resource content itself is identical. Walks the resource directory tree and
+    /// reports those four-byte RVAs.
+    /// </summary>
+    private static void AddResourceDataRvas(byte[] file, PEHeaders headers, Action<int, int> add)
+    {
+        if (!headers.TryGetDirectoryOffset(headers.PEHeader!.ResourceTableDirectory, out var resourceBase))
+        {
+            return;
+        }
+
+        var resourceEnd = resourceBase + headers.PEHeader.ResourceTableDirectory.Size;
+        if (resourceEnd > file.Length)
+        {
+            return;
+        }
+
+        var visited = new HashSet<int>();
+        WalkDirectory(resourceBase, 0);
+
+        void WalkDirectory(int directoryOffset, int depth)
+        {
+            // The format allows three levels (type / name / language); the depth bound also
+            // stops a malformed file's cyclic offsets.
+            if (depth > 3 || directoryOffset + 16 > resourceEnd || !visited.Add(directoryOffset))
+            {
+                return;
+            }
+
+            var entryCount =
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(file.AsSpan(directoryOffset + 12)) +
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(file.AsSpan(directoryOffset + 14));
+            for (var i = 0; i < entryCount; i++)
+            {
+                var entryOffset = directoryOffset + 16 + i * 8;
+                if (entryOffset + 8 > resourceEnd)
+                {
+                    return;
+                }
+
+                var value = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(entryOffset + 4));
+                var target = resourceBase + (int)(value & 0x7FFFFFFF);
+                if ((value & 0x80000000) != 0)
+                {
+                    WalkDirectory(target, depth + 1);
+                }
+                else if (target + 16 <= resourceEnd)
+                {
+                    // IMAGE_RESOURCE_DATA_ENTRY: OffsetToData (an RVA), Size, CodePage, Reserved.
+                    add(target, 4);
+                }
+            }
+        }
     }
 
     public static ComparisonResult ComparePdbs(string originalPath, string rebuiltPath)

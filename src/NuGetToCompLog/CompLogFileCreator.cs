@@ -368,6 +368,177 @@ public class CompLogFileCreator
         File.Copy(originalPdb, destination, overwrite: true);
     }
 
+    /// <summary>
+    /// Whether to rebuild with /features:nullablePublicOnly, which restricts nullable metadata
+    /// to externally visible members. The feature list is not recorded in the PDB, so it has to
+    /// be read off the shipped assembly, via one definitive signal and one safe fallback:
+    ///
+    /// 1. Roslyn marks the module with a synthesized NullablePublicOnlyAttribute whenever the
+    ///    feature emitted anything - definitive evidence that it was on.
+    /// 2. If the assembly carries no nullable metadata at all, the feature either was on and
+    ///    suppressed everything (nothing externally visible was annotated, so no marker was
+    ///    emitted either) or the sources are nullable-oblivious. Passing the flag is right in
+    ///    the first case and a no-op in the second: it only ever removes annotations, and there
+    ///    are none on the externally visible surface to remove.
+    /// </summary>
+    private static bool UsesNullablePublicOnly(string assemblyPath)
+    {
+        try
+        {
+            using var stream = File.OpenRead(assemblyPath);
+            using var peReader = new System.Reflection.PortableExecutable.PEReader(stream);
+            var reader = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(peReader);
+
+            foreach (var handle in reader.GetModuleDefinition().GetCustomAttributes())
+            {
+                // Roslyn emits this into System.Runtime.CompilerServices; older versions used
+                // Microsoft.CodeAnalysis, so match on the name and accept either namespace.
+                if (AttributeTypeName(reader, reader.GetCustomAttribute(handle)) is
+                    (_, "NullablePublicOnlyAttribute"))
+                {
+                    return true;
+                }
+            }
+
+            return !HasNullableMetadata(reader);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The diagnostic IDs of every [Experimental] API declared by the assembly under analysis
+    /// or by the references it was built against. Roslyn reports these as errors at every use
+    /// site, so any of them left unsuppressed fails the rebuild outright.
+    /// </summary>
+    private static List<string> CollectExperimentalDiagnosticIds(
+        string assemblyPath,
+        Dictionary<string, string> acquiredReferences)
+    {
+        var ids = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var path in acquiredReferences.Values.Prepend(assemblyPath))
+        {
+            AddExperimentalDiagnosticIds(path, ids);
+        }
+        return ids.ToList();
+    }
+
+    private static void AddExperimentalDiagnosticIds(string assemblyPath, SortedSet<string> ids)
+    {
+        try
+        {
+            using var stream = File.OpenRead(assemblyPath);
+            using var peReader = new System.Reflection.PortableExecutable.PEReader(stream);
+            var reader = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(peReader);
+
+            foreach (var handle in reader.CustomAttributes)
+            {
+                var attribute = reader.GetCustomAttribute(handle);
+                if (AttributeTypeName(reader, attribute) is not
+                    ("System.Diagnostics.CodeAnalysis", "ExperimentalAttribute"))
+                {
+                    continue;
+                }
+
+                // ExperimentalAttribute(string diagnosticId): the id is the sole fixed argument.
+                var value = attribute.DecodeValue(new StringOnlyAttributeTypeProvider())
+                    .FixedArguments.FirstOrDefault().Value as string;
+                if (!string.IsNullOrEmpty(value))
+                {
+                    ids.Add(value);
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    /// <summary>
+    /// Minimal custom-attribute type provider: only the string constructor argument of
+    /// [Experimental] is read, so every other type can decode to object.
+    /// </summary>
+    private sealed class StringOnlyAttributeTypeProvider
+        : System.Reflection.Metadata.ICustomAttributeTypeProvider<object?>
+    {
+        public object? GetPrimitiveType(System.Reflection.Metadata.PrimitiveTypeCode typeCode) => null;
+        public object? GetSystemType() => null;
+        public object? GetSZArrayType(object? elementType) => null;
+        public object? GetTypeFromDefinition(
+            System.Reflection.Metadata.MetadataReader reader,
+            System.Reflection.Metadata.TypeDefinitionHandle handle, byte rawTypeKind) => null;
+        public object? GetTypeFromReference(
+            System.Reflection.Metadata.MetadataReader reader,
+            System.Reflection.Metadata.TypeReferenceHandle handle, byte rawTypeKind) => null;
+        public object? GetTypeFromSerializedName(string name) => null;
+        public System.Reflection.Metadata.PrimitiveTypeCode GetUnderlyingEnumType(object? type) =>
+            System.Reflection.Metadata.PrimitiveTypeCode.Int32;
+        public bool IsSystemType(object? type) => false;
+    }
+
+    /// <summary>
+    /// Whether the assembly references or defines Roslyn's nullable annotation attributes -
+    /// the types every emitted nullable annotation is expressed through.
+    /// </summary>
+    private static bool HasNullableMetadata(System.Reflection.Metadata.MetadataReader reader)
+    {
+        foreach (var handle in reader.TypeDefinitions)
+        {
+            if (IsNullableAnnotationType(reader.GetString(reader.GetTypeDefinition(handle).Name)))
+            {
+                return true;
+            }
+        }
+
+        foreach (var handle in reader.TypeReferences)
+        {
+            if (IsNullableAnnotationType(reader.GetString(reader.GetTypeReference(handle).Name)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+
+        static bool IsNullableAnnotationType(string name) =>
+            name is "NullableAttribute" or "NullableContextAttribute";
+    }
+
+    /// <summary>
+    /// The declaring type of a custom attribute's constructor, as (namespace, name). The
+    /// constructor is a MemberRef for referenced attributes and a MethodDef for ones the
+    /// compiler embedded in this assembly.
+    /// </summary>
+    private static (string Namespace, string Name)? AttributeTypeName(
+        System.Reflection.Metadata.MetadataReader reader,
+        System.Reflection.Metadata.CustomAttribute attribute)
+    {
+        switch (attribute.Constructor.Kind)
+        {
+            case System.Reflection.Metadata.HandleKind.MemberReference:
+                var member = reader.GetMemberReference(
+                    (System.Reflection.Metadata.MemberReferenceHandle)attribute.Constructor);
+                if (member.Parent.Kind != System.Reflection.Metadata.HandleKind.TypeReference)
+                {
+                    return null;
+                }
+                var typeRef = reader.GetTypeReference(
+                    (System.Reflection.Metadata.TypeReferenceHandle)member.Parent);
+                return (reader.GetString(typeRef.Namespace), reader.GetString(typeRef.Name));
+
+            case System.Reflection.Metadata.HandleKind.MethodDefinition:
+                var method = reader.GetMethodDefinition(
+                    (System.Reflection.Metadata.MethodDefinitionHandle)attribute.Constructor);
+                var typeDef = reader.GetTypeDefinition(method.GetDeclaringType());
+                return (reader.GetString(typeDef.Namespace), reader.GetString(typeDef.Name));
+
+            default:
+                return null;
+        }
+    }
+
     private static string[] BuildCompilerArguments(
         Dictionary<string, string> argsDict,
         string assemblyPath,
@@ -447,12 +618,17 @@ public class CompLogFileCreator
         }
         // Documents outside the project root (e.g. NuGet contentFiles recorded under the "/_1/"
         // pathmap root) live under src/_external/<original-root>/...; map them back to their
-        // absolute originals first - csc applies the first matching pathmap entry, so this must
-        // precede the general src/ mapping.
-        if (manifest != null && manifest.Documents.Any(d =>
-                d.LocalPath.StartsWith("_external/", StringComparison.Ordinal)))
+        // absolute originals first - csc applies the first matching pathmap entry, so these must
+        // precede the general src/ mapping. One entry per original root, because _external/
+        // flattens both Unix ("/home/..." -> "_external/home/...") and Windows drive roots
+        // ("C:/src/..." -> "_external/C/src/...") and only the document paths can tell them apart.
+        if (manifest != null)
         {
-            args.Add("/pathmap:src/_external/=/");
+            foreach (var (localPrefix, originalPrefix) in SourcePathMapper.DeriveExternalPathMaps(
+                         manifest.Documents.Select(d => (d.LocalPath, d.DocumentPath))))
+            {
+                args.Add($"/pathmap:src/{localPrefix}={originalPrefix}");
+            }
         }
         if (manifest?.PathMapRoot != null)
         {
@@ -504,6 +680,26 @@ public class CompLogFileCreator
         
         // /features:strict
         args.Add("/features:strict");
+
+        // The PDB's compilation-options blob does not record /features:, so nullablePublicOnly
+        // has to be inferred from the shipped assembly. Without it the rebuild annotates every
+        // member instead of just the externally visible ones, adding dozens of spurious
+        // Nullable/NullableContext rows (and sometimes the attribute types themselves).
+        if (UsesNullablePublicOnly(assemblyPath))
+        {
+            args.Add("/features:nullablePublicOnly");
+        }
+
+        // [Experimental("ID")] APIs raise ID as an *error* by default, so a library that uses
+        // its own (or a dependency's) experimental surface only builds with those IDs muted.
+        // /nowarn: is not recorded in the PDB either, but the attribute carries the ID, so the
+        // suppressions the original build must have had can be reconstructed from metadata.
+        // Diagnostic suppression cannot change codegen, so this cannot mask real drift.
+        var experimentalIds = CollectExperimentalDiagnosticIds(assemblyPath, acquiredReferences);
+        if (experimentalIds.Count > 0)
+        {
+            args.Add($"/nowarn:{string.Join(",", experimentalIds)}");
+        }
         
         // Additional metadata args
         foreach (var kvp in argsDict)

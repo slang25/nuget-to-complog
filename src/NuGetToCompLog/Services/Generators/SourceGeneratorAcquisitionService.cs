@@ -14,7 +14,11 @@ namespace NuGetToCompLog.Services.Generators;
 
 /// <summary>
 /// Which analyzer assemblies to attach to the rebuild and which manifest documents they
-/// replace. AnalyzerPaths are copied under sources/analyzers/ so the complog embeds them.
+/// replace. AnalyzerFileNames are paths relative to sources/analyzers/ - one subdirectory per
+/// generator payload - and list every DLL of the payload, not just the generator assembly:
+/// a complog only stores the analyzer references it sees on the command line, so an
+/// unreferenced dependency would be missing from the exported build and the generator would
+/// fail to load.
 /// </summary>
 public record GeneratorPlan(
     List<string> AnalyzerFileNames,
@@ -85,6 +89,51 @@ public static class SourceGeneratorAcquisitionService
         var plan = new GeneratorPlan([], [], byAssembly.Values.First().First().BaseDir, new Dictionary<string, string>());
         var anyFailed = false;
 
+        // One payload directory per source directory the DLLs came from, so generators shipped
+        // side by side in a package share a payload while generators needing different versions
+        // of the same dependency stay separated. Dependencies are listed after every generator
+        // assembly (see AttachPayload) to keep generator run order matching document order.
+        var payloadDirs = new Dictionary<string, string>(StringComparer.Ordinal);
+        var dependencyFileNames = new List<string>();
+
+        // Copies the candidate directory into its payload directory on first use and returns
+        // the payload's name; records every non-generator DLL as part of the analyzer payload.
+        string AttachPayload(string candidateDir, string generatorAssembly)
+        {
+            if (payloadDirs.TryGetValue(candidateDir, out var existing))
+            {
+                return existing;
+            }
+
+            var payloadName = generatorAssembly;
+            var payloadDir = Path.Combine(analyzersDir, payloadName);
+            Directory.CreateDirectory(payloadDir);
+            foreach (var dll in Directory.GetFiles(candidateDir, "*.dll").OrderBy(f => f, StringComparer.Ordinal))
+            {
+                var fileName = Path.GetFileName(dll);
+                File.Copy(dll, Path.Combine(payloadDir, fileName), overwrite: true);
+                // Generator assemblies are referenced by their own attach step, in document
+                // order; referencing one twice would run it twice and duplicate its output.
+                if (!byAssembly.ContainsKey(Path.GetFileNameWithoutExtension(fileName)))
+                {
+                    dependencyFileNames.Add(Path.Combine(payloadName, fileName));
+                }
+            }
+
+            payloadDirs[candidateDir] = payloadName;
+            return payloadName;
+        }
+
+        GeneratorPlan? Finish()
+        {
+            if (plan.AnalyzerFileNames.Count == 0)
+            {
+                return null;
+            }
+            plan.AnalyzerFileNames.AddRange(dependencyFileNames);
+            return plan;
+        }
+
         foreach (var (generatorAssembly, docs) in byAssembly)
         {
             var expected = new Dictionary<(string Type, string File), string>();
@@ -130,7 +179,7 @@ public static class SourceGeneratorAcquisitionService
                 sourcesDir, manifest, allGeneratedPaths, argsDict, acquiredReferences, assemblyName);
             if (validationCompilation == null)
             {
-                return plan.AnalyzerFileNames.Count > 0 ? plan : null;
+                return Finish();
             }
 
             // Try each candidate dll, first with no analyzer options, then with options inferred
@@ -155,12 +204,8 @@ public static class SourceGeneratorAcquisitionService
                         continue;
                     }
 
-                    Directory.CreateDirectory(analyzersDir);
-                    foreach (var dependency in Directory.GetFiles(candidateDir, "*.dll"))
-                    {
-                        File.Copy(dependency, Path.Combine(analyzersDir, Path.GetFileName(dependency)), overwrite: true);
-                    }
-                    plan.AnalyzerFileNames.Add(generatorAssembly + ".dll");
+                    var payloadName = AttachPayload(candidateDir, generatorAssembly);
+                    plan.AnalyzerFileNames.Add(Path.Combine(payloadName, generatorAssembly + ".dll"));
                     foreach (var (key, value) in options)
                     {
                         plan.GlobalOptions[key] = value;
@@ -195,7 +240,7 @@ public static class SourceGeneratorAcquisitionService
             return null;
         }
 
-        return plan.AnalyzerFileNames.Count > 0 ? plan : null;
+        return Finish();
     }
 
     private static readonly HttpClient Http = new();
