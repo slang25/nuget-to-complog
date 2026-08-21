@@ -27,6 +27,7 @@ public class EjectPackageCommandHandler
         string packageId,
         string? version = null,
         string? outputDirectory = null,
+        string? assembly = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -36,7 +37,7 @@ public class EjectPackageCommandHandler
                 $"[cyan]{packageId}[/] {(version != null ? $"[yellow]{version}[/]" : "[dim](latest)[/]")}",
                 "Green");
 
-            var result = await _pipeline.AnalyzeAsync(packageId, version, cancellationToken);
+            var result = await _pipeline.AnalyzeAsync(packageId, version, assembly, cancellationToken);
             if (result == null)
             {
                 _console.MarkupLine("[red]\u2717[/] Failed to analyze package");

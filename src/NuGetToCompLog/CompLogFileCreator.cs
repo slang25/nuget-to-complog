@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.VisualBasic;
 using Spectre.Console;
 using NuGetToCompLog.Services;
+using NuGetToCompLog.Services.Reconstruction;
 
 namespace NuGetToCompLog;
 
@@ -19,8 +20,11 @@ public class CompLogFileCreator
         string workingDirectory,
         string outputDirectory,
         string? overrideTfm = null,
-        List<string>? selectedAssemblies = null)
+        List<string>? selectedAssemblies = null,
+        ReconstructionLedger? ledger = null,
+        bool runGenerators = true)
     {
+        ledger ??= new ReconstructionLedger();
         AnsiConsole.MarkupLine("");
         AnsiConsole.MarkupLine("[yellow]Creating .complog file...[/]");
 
@@ -93,8 +97,14 @@ public class CompLogFileCreator
             }
 
             var argsDict = ParseCompilerArgumentsFile(compilerArgs);
-            var compilerPath = FindCompilerPath(isCSharp, argsDict.GetValueOrDefault("compiler-version"));
+            var compilerPath = FindCompilerPath(isCSharp, argsDict.GetValueOrDefault("compiler-version"), ledger);
             var targetFramework = overrideTfm ?? ExtractTargetFramework(argsDict);
+            ledger.Recorded(ReconstructionLedger.CategoryOption, "compilation options blob",
+                "read from the PDB's compilation-options custom debug information",
+                argsDict.Count(kvp => kvp.Key != "__extra_args__"));
+            ledger.Derived(ReconstructionLedger.CategoryOption, "/debug",
+                $"{debugConfig.DebugType} debug settings - with /deterministic and /highentropyva - " +
+                "read from the assembly's debug directory and PE header");
             
             if (overrideTfm != null && overrideTfm != ExtractTargetFramework(argsDict))
             {
@@ -130,7 +140,7 @@ public class CompLogFileCreator
             Dictionary<string, string> acquiredReferences = new();
             if (metadataReferences.Count > 0 && !string.IsNullOrEmpty(targetFramework))
             {
-                var acquisitionService = new ReferenceAssemblyAcquisitionService(workingDirectory);
+                var acquisitionService = new ReferenceAssemblyAcquisitionService(workingDirectory, ledger);
                 acquiredReferences = await acquisitionService.AcquireAllReferencesAsync(metadataReferences, targetFramework);
                 
                 if (acquiredReferences.Count == 0)
@@ -148,13 +158,27 @@ public class CompLogFileCreator
             }
 
             var manifest = SourceManifest.TryLoad(workingDirectory);
-            var strongNameArgs = await PrepareStrongNameArgsAsync(assemblyPath, workingDirectory, diagnostics);
+            var strongNameArgs = await PrepareStrongNameArgsAsync(assemblyPath, workingDirectory, ledger);
             CopyOriginalPdbNextToSources(assemblyPath, workingDirectory, debugConfig, manifest);
 
-            var args = BuildCompilerArguments(argsDict, assemblyPath, workingDirectory, acquiredReferences, debugConfig, manifest, strongNameArgs);
+            // Generator-produced documents can only be reproduced exactly by running the actual
+            // generator (checksum algorithm and embedded compression differ for plain files);
+            // swap them for /analyzer references when the generator provably regenerates them.
+            Services.Generators.GeneratorPlan? generatorPlan = null;
+            if (manifest != null)
+            {
+                generatorPlan = await Services.Generators.SourceGeneratorAcquisitionService.TryPlanAsync(
+                    workingDirectory, manifest, argsDict, acquiredReferences,
+                    Path.GetFileNameWithoutExtension(assemblyPath), ledger, runGenerators);
+            }
+
+            var args = BuildCompilerArguments(argsDict, assemblyPath, workingDirectory, acquiredReferences, debugConfig, manifest, strongNameArgs, generatorPlan, ledger);
 
             var projectDir = Path.Combine(workingDirectory, "sources");
-            var projectFilePath = Path.Combine(projectDir, $"{packageId}.csproj");
+            // Name the call after the assembly it builds, not the package: a package shipping
+            // several assemblies is captured one at a time, and consumers (verify, above all)
+            // identify the compilation by the assembly they are comparing against.
+            var projectFilePath = Path.Combine(projectDir, $"{Path.GetFileNameWithoutExtension(assemblyPath)}.csproj");
             
             var compilerCall = new CompilerCall(
                 projectFilePath: projectFilePath,
@@ -193,6 +217,13 @@ public class CompLogFileCreator
             AnsiConsole.MarkupLine($"  [red]✗[/] Error creating complog: {ex.Message}");
             AnsiConsole.MarkupLine($"  [dim]{ex.StackTrace}[/]");
             diagnostics.Add($"Error creating complog: {ex.Message}");
+        }
+
+        if (File.Exists(complogPath))
+        {
+            var ledgerPath = Path.Combine(outputDirectory, $"{packageId}.{version}.reconstruction.json");
+            await ledger.SaveAsync(ledgerPath);
+            ledger.Render(new Infrastructure.Console.SpectreConsoleWriter(), ledgerPath);
         }
 
         if (diagnostics.Count > 0)
@@ -275,7 +306,7 @@ public class CompLogFileCreator
     private static async Task<List<string>> PrepareStrongNameArgsAsync(
         string assemblyPath,
         string workingDirectory,
-        List<string> diagnostics)
+        ReconstructionLedger? ledger)
     {
         var strongName = StrongNameUtil.TryGetStrongNameInfo(assemblyPath);
         if (strongName == null)
@@ -296,6 +327,8 @@ public class CompLogFileCreator
                 var keyPath = Path.Combine(sourcesDir, "signing-key.snk");
                 await File.WriteAllBytesAsync(keyPath, repoKey);
                 AnsiConsole.MarkupLine("  [green]✓[/] Found matching signing key (.snk) in source repository - using full signing");
+                ledger?.Proven(ReconstructionLedger.CategorySigning, "/keyfile",
+                    "the committed .snk from the source repository, matching the assembly's public key");
                 return ["/keyfile:signing-key.snk"];
             }
         }
@@ -304,8 +337,14 @@ public class CompLogFileCreator
         await File.WriteAllBytesAsync(publicKeyPath, strongName.PublicKey);
         if (strongName.IsSigned)
         {
-            diagnostics.Add("Assembly is fully strong-name signed but no matching .snk was found in the repo; " +
-                            "using /publicsign - the strong name signature bytes will not match the original");
+            ledger?.Substituted(ReconstructionLedger.CategorySigning, "/publicsign",
+                "the assembly is fully signed but no matching .snk was found in the repo, so the strong " +
+                "name signature bytes are left zeroed");
+        }
+        else
+        {
+            ledger?.Derived(ReconstructionLedger.CategorySigning, "/publicsign",
+                "public key extracted from the assembly; the original was public-signed too");
         }
         AnsiConsole.MarkupLine("  [cyan]→[/] Strong-named assembly: using /publicsign with extracted public key");
         return ["/publicsign+", "/keyfile:public-key.snk"];
@@ -357,6 +396,197 @@ public class CompLogFileCreator
         File.Copy(originalPdb, destination, overwrite: true);
     }
 
+    /// <summary>
+    /// The /filealign: value the original build used, taken from the FileAlignment field of the
+    /// shipped PE (csc writes the flag straight into it). Null when the assembly cannot be read,
+    /// or when its alignment is not one csc accepts - an assembly some other tool produced.
+    /// </summary>
+    private static int? ReadFileAlignment(string assemblyPath)
+    {
+        try
+        {
+            using var stream = File.OpenRead(assemblyPath);
+            using var peReader = new System.Reflection.PortableExecutable.PEReader(stream);
+            var alignment = peReader.PEHeaders.PEHeader?.FileAlignment;
+            return alignment is 512 or 1024 or 2048 or 4096 or 8192 ? alignment : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Whether to rebuild with /features:nullablePublicOnly, which restricts nullable metadata
+    /// to externally visible members. The feature list is not recorded in the PDB, so it has to
+    /// be read off the shipped assembly, via one definitive signal and one safe fallback:
+    ///
+    /// 1. Roslyn marks the module with a synthesized NullablePublicOnlyAttribute whenever the
+    ///    feature emitted anything - definitive evidence that it was on.
+    /// 2. If the assembly carries no nullable metadata at all, the feature either was on and
+    ///    suppressed everything (nothing externally visible was annotated, so no marker was
+    ///    emitted either) or the sources are nullable-oblivious. Passing the flag is right in
+    ///    the first case and a no-op in the second: it only ever removes annotations, and there
+    ///    are none on the externally visible surface to remove.
+    /// </summary>
+    private static bool UsesNullablePublicOnly(string assemblyPath)
+    {
+        try
+        {
+            using var stream = File.OpenRead(assemblyPath);
+            using var peReader = new System.Reflection.PortableExecutable.PEReader(stream);
+            var reader = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(peReader);
+
+            foreach (var handle in reader.GetModuleDefinition().GetCustomAttributes())
+            {
+                // Roslyn emits this into System.Runtime.CompilerServices; older versions used
+                // Microsoft.CodeAnalysis, so match on the name and accept either namespace.
+                if (AttributeTypeName(reader, reader.GetCustomAttribute(handle)) is
+                    (_, "NullablePublicOnlyAttribute"))
+                {
+                    return true;
+                }
+            }
+
+            return !HasNullableMetadata(reader);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The diagnostic IDs of every [Experimental] API declared by the assembly under analysis
+    /// or by the references it was built against. Roslyn reports these as errors at every use
+    /// site, so any of them left unsuppressed fails the rebuild outright.
+    /// </summary>
+    private static List<string> CollectExperimentalDiagnosticIds(
+        string assemblyPath,
+        Dictionary<string, string> acquiredReferences)
+    {
+        var ids = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var path in acquiredReferences.Values.Prepend(assemblyPath))
+        {
+            AddExperimentalDiagnosticIds(path, ids);
+        }
+        return ids.ToList();
+    }
+
+    private static void AddExperimentalDiagnosticIds(string assemblyPath, SortedSet<string> ids)
+    {
+        try
+        {
+            using var stream = File.OpenRead(assemblyPath);
+            using var peReader = new System.Reflection.PortableExecutable.PEReader(stream);
+            var reader = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(peReader);
+
+            foreach (var handle in reader.CustomAttributes)
+            {
+                var attribute = reader.GetCustomAttribute(handle);
+                if (AttributeTypeName(reader, attribute) is not
+                    ("System.Diagnostics.CodeAnalysis", "ExperimentalAttribute"))
+                {
+                    continue;
+                }
+
+                // ExperimentalAttribute(string diagnosticId): the id is the sole fixed argument.
+                var value = attribute.DecodeValue(new StringOnlyAttributeTypeProvider())
+                    .FixedArguments.FirstOrDefault().Value as string;
+                if (!string.IsNullOrEmpty(value))
+                {
+                    ids.Add(value);
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    /// <summary>
+    /// Minimal custom-attribute type provider: only the string constructor argument of
+    /// [Experimental] is read, so every other type can decode to object.
+    /// </summary>
+    private sealed class StringOnlyAttributeTypeProvider
+        : System.Reflection.Metadata.ICustomAttributeTypeProvider<object?>
+    {
+        public object? GetPrimitiveType(System.Reflection.Metadata.PrimitiveTypeCode typeCode) => null;
+        public object? GetSystemType() => null;
+        public object? GetSZArrayType(object? elementType) => null;
+        public object? GetTypeFromDefinition(
+            System.Reflection.Metadata.MetadataReader reader,
+            System.Reflection.Metadata.TypeDefinitionHandle handle, byte rawTypeKind) => null;
+        public object? GetTypeFromReference(
+            System.Reflection.Metadata.MetadataReader reader,
+            System.Reflection.Metadata.TypeReferenceHandle handle, byte rawTypeKind) => null;
+        public object? GetTypeFromSerializedName(string name) => null;
+        public System.Reflection.Metadata.PrimitiveTypeCode GetUnderlyingEnumType(object? type) =>
+            System.Reflection.Metadata.PrimitiveTypeCode.Int32;
+        public bool IsSystemType(object? type) => false;
+    }
+
+    /// <summary>
+    /// Whether the assembly references or defines Roslyn's nullable annotation attributes -
+    /// the types every emitted nullable annotation is expressed through.
+    /// </summary>
+    private static bool HasNullableMetadata(System.Reflection.Metadata.MetadataReader reader)
+    {
+        foreach (var handle in reader.TypeDefinitions)
+        {
+            if (IsNullableAnnotationType(reader.GetString(reader.GetTypeDefinition(handle).Name)))
+            {
+                return true;
+            }
+        }
+
+        foreach (var handle in reader.TypeReferences)
+        {
+            if (IsNullableAnnotationType(reader.GetString(reader.GetTypeReference(handle).Name)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+
+        static bool IsNullableAnnotationType(string name) =>
+            name is "NullableAttribute" or "NullableContextAttribute";
+    }
+
+    /// <summary>
+    /// The declaring type of a custom attribute's constructor, as (namespace, name). The
+    /// constructor is a MemberRef for referenced attributes and a MethodDef for ones the
+    /// compiler embedded in this assembly.
+    /// </summary>
+    private static (string Namespace, string Name)? AttributeTypeName(
+        System.Reflection.Metadata.MetadataReader reader,
+        System.Reflection.Metadata.CustomAttribute attribute)
+    {
+        switch (attribute.Constructor.Kind)
+        {
+            case System.Reflection.Metadata.HandleKind.MemberReference:
+                var member = reader.GetMemberReference(
+                    (System.Reflection.Metadata.MemberReferenceHandle)attribute.Constructor);
+                if (member.Parent.Kind != System.Reflection.Metadata.HandleKind.TypeReference)
+                {
+                    return null;
+                }
+                var typeRef = reader.GetTypeReference(
+                    (System.Reflection.Metadata.TypeReferenceHandle)member.Parent);
+                return (reader.GetString(typeRef.Namespace), reader.GetString(typeRef.Name));
+
+            case System.Reflection.Metadata.HandleKind.MethodDefinition:
+                var method = reader.GetMethodDefinition(
+                    (System.Reflection.Metadata.MethodDefinitionHandle)attribute.Constructor);
+                var typeDef = reader.GetTypeDefinition(method.GetDeclaringType());
+                return (reader.GetString(typeDef.Namespace), reader.GetString(typeDef.Name));
+
+            default:
+                return null;
+        }
+    }
+
     private static string[] BuildCompilerArguments(
         Dictionary<string, string> argsDict,
         string assemblyPath,
@@ -364,7 +594,9 @@ public class CompLogFileCreator
         Dictionary<string, string> acquiredReferences,
         DebugConfiguration debugConfig,
         SourceManifest? manifest,
-        List<string> strongNameArgs)
+        List<string> strongNameArgs,
+        Services.Generators.GeneratorPlan? generatorPlan = null,
+        ReconstructionLedger? ledger = null)
     {
         var args = new List<string>();
         
@@ -412,16 +644,26 @@ public class CompLogFileCreator
         var debugFlags = debugConfig.ToCompilerFlags(pdbOutputPath).Where(f => !f.StartsWith("/highentropyva"));
         args.AddRange(debugFlags);
         
-        // /filealign:
-        args.Add("/filealign:512");
+        // /filealign: is not in the options blob either, but the value csc was given is the
+        // FileAlignment field of the PE it produced, so the shipped assembly states it outright.
+        var fileAlignment = ReadFileAlignment(assemblyPath);
+        args.Add($"/filealign:{fileAlignment ?? 512}");
+        if (fileAlignment != null)
+        {
+            ledger?.Inferred(ReconstructionLedger.CategoryOption, "/filealign",
+                $"{fileAlignment} read from the shipped assembly's PE optional header");
+        }
+        else
+        {
+            ledger?.Assumed(ReconstructionLedger.CategoryOption, "/filealign",
+                "the shipped assembly's PE optional header records no alignment csc could have " +
+                "been given; using its 512 default");
+        }
         
-        // /optimize
+        // /optimize (and /debug+ when the original recorded DebugPlusMode)
         if (argsDict.TryGetValue("optimization", out var optimization))
         {
-            var optimizationValue = optimization.Equals("release", StringComparison.OrdinalIgnoreCase) ||
-                                   optimization.Equals("true", StringComparison.OrdinalIgnoreCase) ||
-                                   optimization.Equals("1", StringComparison.OrdinalIgnoreCase);
-            args.Add($"/optimize{(optimizationValue ? "+" : "-")}");
+            args.AddRange(OptimizationOptions.ToCompilerFlags(optimization));
         }
         
         // Pathmap (must come before /target to match ordering).
@@ -434,6 +676,20 @@ public class CompLogFileCreator
             if (!string.IsNullOrEmpty(pdbDir))
             {
                 args.Add($"/pathmap:output/={pdbDir}/");
+            }
+        }
+        // Documents outside the project root (e.g. NuGet contentFiles recorded under the "/_1/"
+        // pathmap root) live under src/_external/<original-root>/...; map them back to their
+        // absolute originals first - csc applies the first matching pathmap entry, so these must
+        // precede the general src/ mapping. One entry per original root, because _external/
+        // flattens both Unix ("/home/..." -> "_external/home/...") and Windows drive roots
+        // ("C:/src/..." -> "_external/C/src/...") and only the document paths can tell them apart.
+        if (manifest != null)
+        {
+            foreach (var (localPrefix, originalPrefix) in SourcePathMapper.DeriveExternalPathMaps(
+                         manifest.Documents.Select(d => (d.LocalPath, d.DocumentPath))))
+            {
+                args.Add($"/pathmap:src/{localPrefix}={originalPrefix}");
             }
         }
         if (manifest?.PathMapRoot != null)
@@ -469,8 +725,12 @@ public class CompLogFileCreator
             args.Add($"/target:{target}");
         }
         
-        // /utf8output
+        // /utf8output sets the encoding csc writes its *diagnostics* in; it reaches neither the
+        // assembly nor the PDB, so passing it unconditionally cannot make the rebuild differ.
         args.Add("/utf8output");
+        ledger?.Derived(ReconstructionLedger.CategoryOption, "/utf8output",
+            "not recorded anywhere; it only sets the encoding of csc's console output, so it " +
+            "cannot change the emitted bytes");
         
         // /deterministic+ - essential for reproducible builds (moved here to match original order)
         if (debugConfig.HasReproducible)
@@ -484,8 +744,40 @@ public class CompLogFileCreator
             args.Add($"/langversion:{langVersion}");
         }
         
-        // /features:strict
+        // /features:strict is what the .NET SDK puts in $(Features) by default, and csc records
+        // no /features: at all - so this is a convention, not a reading. It is safe to apply
+        // blind because strict only tightens which diagnostics are reported: getting it wrong
+        // fails the rebuild outright rather than quietly changing the emitted bytes.
         args.Add("/features:strict");
+        ledger?.Derived(ReconstructionLedger.CategoryOption, "/features:strict",
+            "the .NET SDK's default $(Features); csc records no /features:, but strict changes " +
+            "only diagnostics, so it cannot alter the emitted bytes");
+
+        // The PDB's compilation-options blob does not record /features:, so nullablePublicOnly
+        // has to be inferred from the shipped assembly. Without it the rebuild annotates every
+        // member instead of just the externally visible ones, adding dozens of spurious
+        // Nullable/NullableContext rows (and sometimes the attribute types themselves).
+        if (UsesNullablePublicOnly(assemblyPath))
+        {
+            args.Add("/features:nullablePublicOnly");
+            ledger?.Inferred(ReconstructionLedger.CategoryOption, "/features:nullablePublicOnly",
+                "csc never records /features:, so this was read off the shipped assembly");
+        }
+
+        // [Experimental("ID")] APIs raise ID as an *error* by default, so a library that uses
+        // its own (or a dependency's) experimental surface only builds with those IDs muted.
+        // /nowarn: is not recorded in the PDB either, but the attribute carries the ID, so the
+        // suppressions the original build must have had can be reconstructed from metadata.
+        // Diagnostic suppression cannot change codegen, so this cannot mask real drift.
+        var experimentalIds = CollectExperimentalDiagnosticIds(assemblyPath, acquiredReferences);
+        if (experimentalIds.Count > 0)
+        {
+            args.Add($"/nowarn:{string.Join(",", experimentalIds)}");
+            ledger?.Inferred(ReconstructionLedger.CategoryOption, "/nowarn",
+                $"[Experimental] diagnostic id(s) {string.Join(", ", experimentalIds)} read from the assembly " +
+                "and its references; the original build must have muted them to compile at all",
+                experimentalIds.Count);
+        }
         
         // Additional metadata args
         foreach (var kvp in argsDict)
@@ -503,8 +795,17 @@ public class CompLogFileCreator
                 "runtime-version" => "runtimemetadataversion",
                 _ => kvp.Key
             };
-            
-            args.Add($"/{argName}:{kvp.Value}");
+
+            // Boolean options (e.g. "unsafe:True") use csc's +/- flag form; "/unsafe:True"
+            // is rejected with CS2007.
+            if (bool.TryParse(kvp.Value, out var flag))
+            {
+                args.Add($"/{argName}{(flag ? "+" : "-")}");
+            }
+            else
+            {
+                args.Add($"/{argName}:{kvp.Value}");
+            }
         }
         
         // Strong-name signing arguments (paths relative to the sources/project directory)
@@ -521,12 +822,42 @@ public class CompLogFileCreator
             args.Add("/sourcelink:source-link.json");
         }
 
+        // Attach validated source generators; csc re-generates (and auto-embeds) their
+        // documents itself, so those are excluded from the source and /embed lists below.
+        // /generatedfilesout anchors the generated trees at the original obj/ path so the
+        // src/ pathmap reproduces the original document paths.
+        if (generatorPlan != null)
+        {
+            foreach (var analyzer in generatorPlan.AnalyzerFileNames)
+            {
+                // Absolute: CompilerLogBuilder reads analyzer bytes at creation time and does
+                // not resolve relative analyzer paths against the project directory.
+                args.Add($"/analyzer:{Path.Combine(workingDirectory, "sources", "analyzers", analyzer)}");
+            }
+            args.Add($"/generatedfilesout:{generatorPlan.GeneratedFilesBaseDir}");
+
+            if (generatorPlan.GlobalOptions.Count > 0)
+            {
+                // Carry the inferred analyzer options (validated above) into the rebuild.
+                var configLines = new List<string> { "is_global = true" };
+                configLines.AddRange(generatorPlan.GlobalOptions
+                    .OrderBy(kvp => kvp.Key, StringComparer.Ordinal)
+                    .Select(kvp => $"{kvp.Key} = {kvp.Value}"));
+                File.WriteAllLines(Path.Combine(sourcesDir, "generators.globalconfig"), configLines);
+                args.Add("/analyzerconfig:generators.globalconfig");
+            }
+        }
+
         // /embed: re-embeds the sources the original PDB embedded (typically the compiler-
         // generated files under obj/)
         if (manifest != null)
         {
             foreach (var doc in manifest.Documents.Where(d => d.IsEmbedded))
             {
+                if (generatorPlan?.GeneratedLocalPaths.Contains(doc.LocalPath) == true)
+                {
+                    continue;
+                }
                 // /embed takes a comma-separated path list, so paths containing commas
                 // (e.g. ".NETCoreApp,Version=v9.0.AssemblyAttributes.cs") must be quoted.
                 var path = doc.LocalPath.Contains(',') || doc.LocalPath.Contains(' ')
@@ -543,6 +874,10 @@ public class CompLogFileCreator
         {
             foreach (var doc in manifest.Documents)
             {
+                if (generatorPlan?.GeneratedLocalPaths.Contains(doc.LocalPath) == true)
+                {
+                    continue;
+                }
                 if (!File.Exists(Path.Combine(sourcesDir, doc.LocalPath)))
                 {
                     AnsiConsole.MarkupLine($"  [yellow]⚠[/] Source file missing, skipping: [dim]{doc.LocalPath}[/]");
@@ -616,7 +951,8 @@ public class CompLogFileCreator
         return args.ToArray();
     }
 
-    private static string? FindCompilerPath(bool isCSharp, string? compilerVersion = null)
+    private static string? FindCompilerPath(
+        bool isCSharp, string? compilerVersion = null, ReconstructionLedger? ledger = null)
     {
         var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT")
             ?? "/usr/local/share/dotnet";
@@ -644,10 +980,15 @@ public class CompLogFileCreator
             if (exact != null)
             {
                 AnsiConsole.MarkupLine($"  [green]✓[/] Found exact compiler version {compilerVersion.Split('+')[0]} in local SDKs");
+                ledger?.Proven(ReconstructionLedger.CategoryCompiler, compilerVersion.Split('+')[0],
+                    "the exact compiler recorded in the PDB, found in an installed SDK");
                 return exact;
             }
 
             AnsiConsole.MarkupLine($"  [yellow]⚠[/] Compiler {compilerVersion.Split('+')[0]} not installed locally; complog will reference the newest SDK compiler");
+            ledger?.Assumed(ReconstructionLedger.CategoryCompiler, compilerVersion.Split('+')[0],
+                "not installed locally, so the complog references the newest SDK compiler - " +
+                "codegen and generated-document checksums differ between compiler versions");
         }
 
         return candidates.FirstOrDefault();

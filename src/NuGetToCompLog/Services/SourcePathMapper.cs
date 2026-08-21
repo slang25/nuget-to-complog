@@ -66,7 +66,58 @@ public sealed class SourcePathMapper
             trimmed = trimmed[0] + trimmed[2..];
         }
 
-        return "_external/" + trimmed;
+        return ExternalPrefix + trimmed;
+    }
+
+    /// <summary>
+    /// Derives the /pathmap keys that map the local _external/ layout back to the original
+    /// document roots. <see cref="MapToLocal"/> is lossy at the root - it strips the leading
+    /// '/' of a Unix path and the ':' of a Windows drive path - so a single "_external/" =&gt; "/"
+    /// entry would turn "C:/src/a.cs" into "/C/src/a.cs". Recovering the roots per document
+    /// (by the longest suffix its local and original paths share at a '/' boundary) yields
+    /// "_external/" =&gt; "/" for Unix and "_external/C/" =&gt; "C:/" for a Windows drive.
+    /// Ordered longest key first, since csc applies the first matching entry.
+    /// </summary>
+    public static List<(string LocalPrefix, string OriginalPrefix)> DeriveExternalPathMaps(
+        IEnumerable<(string LocalPath, string DocumentPath)> documents)
+    {
+        var byLocalPrefix = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (localPath, documentPath) in documents)
+        {
+            var local = Normalize(localPath);
+            if (!local.StartsWith(ExternalPrefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var original = Normalize(documentPath);
+            int i = local.Length, j = original.Length, cutLocal = -1, cutOriginal = -1;
+            while (i > 0 && j > 0 && local[i - 1] == original[j - 1])
+            {
+                i--;
+                j--;
+                if (local[i] == '/')
+                {
+                    cutLocal = i;
+                    cutOriginal = j;
+                }
+            }
+
+            // No shared directory boundary: the document path isn't what produced this local
+            // path, so there's nothing to map it back to.
+            if (cutLocal < ExternalPrefix.Length - 1)
+            {
+                continue;
+            }
+
+            byLocalPrefix.TryAdd(local[..(cutLocal + 1)], original[..(cutOriginal + 1)]);
+        }
+
+        return byLocalPrefix
+            .OrderByDescending(kvp => kvp.Key.Length)
+            .ThenBy(kvp => kvp.Key, StringComparer.Ordinal)
+            .Select(kvp => (kvp.Key, kvp.Value))
+            .ToList();
     }
 
     /// <summary>
@@ -74,6 +125,8 @@ public sealed class SourcePathMapper
     /// </summary>
     public bool IsUnderRoot(string documentPath) =>
         RootPrefix != null && Normalize(documentPath).StartsWith(RootPrefix, StringComparison.OrdinalIgnoreCase);
+
+    private const string ExternalPrefix = "_external/";
 
     private static string Normalize(string path) => path.Replace('\\', '/');
 

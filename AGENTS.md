@@ -58,6 +58,18 @@ The tool extracts metadata from portable PDBs using these GUIDs:
 - `CC110556-A091-4D38-9FEC-25AB9A351A6A` - Source Link configuration
 - `0E8A571B-6926-466E-B4AD-8AB04611F5FE` - Embedded source files
 
+### The Reconstruction Ledger
+
+A package does not record everything csc was given (no analyzer set, no generator package
+versions, no `/features:` or `/nowarn:`), so the tool infers those and records what it did in
+`Services/Reconstruction/ReconstructionLedger.cs`. Any code that decides where an input comes
+from should say so on the ledger: `Recorded`/`Derived`/`Inferred`/`Proven` for inputs we can
+stand behind, `Assumed`/`Substituted`/`Missing` for the ones that stop a rebuild being a
+faithful replay. Prefer classifying by *evidence* (does it hash to the recorded checksum? does
+the MVID match?) over the code path that produced it. Roll uniform groups into one entry with a
+`Count`; name problems individually. The written file is a golden file — no timestamps, no
+machine paths, stable ordering.
+
 ### Package Requirements
 
 For successful CompLog extraction, packages need:

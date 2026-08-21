@@ -3,6 +3,7 @@ using NuGetToCompLog.Domain;
 using NuGetToCompLog.Services.NuGet;
 using NuGetToCompLog.Services.Pdb;
 using NuGetToCompLog.Infrastructure.SourceDownload;
+using NuGetToCompLog.Services.Reconstruction;
 
 namespace NuGetToCompLog.Services;
 
@@ -48,12 +49,19 @@ public class PackageAnalysisPipeline
     /// <summary>
     /// Analyzes a NuGet package: downloads, extracts, reads PDB metadata,
     /// downloads source files, and returns a result capturing all artifacts.
+    ///
+    /// The working directory describes exactly one compilation - one compiler-arguments.txt,
+    /// one metadata-references.json, one source manifest, one sources/ tree - so when a package
+    /// ships several assemblies for the chosen TFM only one of them is analyzed, and
+    /// <paramref name="assemblyName"/> says which.
     /// </summary>
     public async Task<PackageExtractionResult?> AnalyzeAsync(
         string packageId,
         string? version,
+        string? assemblyName = null,
         CancellationToken cancellationToken = default)
     {
+        var ledger = new ReconstructionLedger();
         var workingDirectory = _fileSystem.CreateTempDirectory();
         _console.MarkupLine($"[dim]Working directory: {workingDirectory}[/]");
         _console.WriteLine();
@@ -92,24 +100,54 @@ public class PackageAnalysisPipeline
             _console.WriteLine();
         }
 
+        // One working directory describes one compilation, so pick the assembly it will describe
+        // and put it first - everything downstream (the complog's single compiler call, the
+        // verify comparison) reads selectedAssemblies[0] and would otherwise risk pairing one
+        // assembly's bytes with another's compiler arguments.
+        var primaryAssembly = SelectPrimaryAssembly(selectedAssemblies, packageId, assemblyName);
+        if (primaryAssembly == null && selectedAssemblies.Count > 0)
+        {
+            _console.MarkupLine(
+                $"[red]\u2717[/] No assembly named [cyan]{assemblyName}[/] in this package" +
+                (selectedTfm != null ? $" for [cyan]{selectedTfm}[/]" : "") + ". Available: " +
+                string.Join(", ", selectedAssemblies.Select(Path.GetFileName)));
+            return null;
+        }
+        selectedAssemblies = selectedAssemblies
+            .OrderByDescending(a => a == primaryAssembly)
+            .ToList();
+        if (primaryAssembly != null && selectedAssemblies.Count > 1)
+        {
+            _console.MarkupLine(
+                $"[yellow]\u26a0[/] This TFM ships {selectedAssemblies.Count} assemblies; only " +
+                $"[cyan]{Path.GetFileName(primaryAssembly)}[/] is analyzed - the complog describes it alone");
+            _console.MarkupLine(
+                "   [dim]Pass --assembly <name.dll> to capture one of the others: " +
+                string.Join(", ", selectedAssemblies.Skip(1).Select(a => Path.GetFileName(a))) + "[/]");
+            _console.WriteLine();
+        }
+
+        ledger.Describe(
+            $"{package.Id}/{package.Version}", selectedTfm,
+            primaryAssembly != null ? Path.GetFileName(primaryAssembly) : null);
+
         // Handle PDB discovery and symbols download
-        var hasEmbeddedPdb = selectedAssemblies.Any(a => _pdbDiscovery.HasEmbeddedPdb(a));
+        var hasEmbeddedPdb = primaryAssembly != null && _pdbDiscovery.HasEmbeddedPdb(primaryAssembly);
         if (!hasEmbeddedPdb)
         {
             await TryDownloadSymbolsAsync(package, workingDirectory, cancellationToken);
         }
         else
         {
-            _console.MarkupLine("[dim]\u26a0 Skipping symbols package download - selected assemblies have embedded PDBs[/]");
+            _console.MarkupLine("[dim]\u26a0 Skipping symbols package download - the selected assembly has an embedded PDB[/]");
             _console.WriteLine();
         }
 
-        // Process each assembly
-        _console.MarkupLine($"  [cyan]\u2192[/] Processing {selectedAssemblies.Count} assembly/assemblies from TFM: [yellow]{selectedTfm}[/]");
-        foreach (var assemblyPath in selectedAssemblies)
+        if (primaryAssembly != null)
         {
-            _console.MarkupLine($"     Assembly: [dim]{Path.GetFileName(assemblyPath)}[/]");
-            await ProcessAssemblyAsync(assemblyPath, workingDirectory, cancellationToken);
+            _console.MarkupLine(
+                $"  [cyan]\u2192[/] Processing [dim]{Path.GetFileName(primaryAssembly)}[/] from TFM: [yellow]{selectedTfm}[/]");
+            await ProcessAssemblyAsync(primaryAssembly, workingDirectory, ledger, cancellationToken);
             _console.WriteLine();
         }
 
@@ -127,7 +165,29 @@ public class PackageAnalysisPipeline
             CompilerArgsFile: File.Exists(compilerArgsFile) ? compilerArgsFile : null,
             MetadataRefsFile: File.Exists(metadataRefsFile) ? metadataRefsFile : null,
             SourcesDirectory: sourcesDir,
-            ResourcesDirectory: Directory.Exists(resourcesDir) ? resourcesDir : null);
+            ResourcesDirectory: Directory.Exists(resourcesDir) ? resourcesDir : null,
+            Ledger: ledger);
+    }
+
+    /// <summary>
+    /// The one assembly this run captures. Defaults to the one named after the package (NUnit's
+    /// nunit.framework.dll sits beside nunit.framework.legacy.dll, and only one of them is what
+    /// the package is), falling back to the first. A caller-supplied name wins, matched with or
+    /// without the .dll suffix; null means the caller asked for an assembly the package has not
+    /// got, or there are no assemblies at all.
+    /// </summary>
+    private static string? SelectPrimaryAssembly(List<string> assemblies, string packageId, string? assemblyName)
+    {
+        if (assemblyName != null)
+        {
+            var wanted = Path.GetFileNameWithoutExtension(assemblyName);
+            return assemblies.FirstOrDefault(a => string.Equals(
+                Path.GetFileNameWithoutExtension(a), wanted, StringComparison.OrdinalIgnoreCase));
+        }
+
+        return assemblies.FirstOrDefault(a => string.Equals(
+                   Path.GetFileNameWithoutExtension(a), packageId, StringComparison.OrdinalIgnoreCase))
+               ?? assemblies.FirstOrDefault();
     }
 
     private void DisplayAssembliesTree(List<string> assemblies, string extractPath)
@@ -193,7 +253,8 @@ public class PackageAnalysisPipeline
         }
     }
 
-    private async Task ProcessAssemblyAsync(string assemblyPath, string workingDirectory, CancellationToken cancellationToken)
+    private async Task ProcessAssemblyAsync(
+        string assemblyPath, string workingDirectory, ReconstructionLedger ledger, CancellationToken cancellationToken)
     {
         var hasEmbeddedPdb = _pdbDiscovery.HasEmbeddedPdb(assemblyPath);
         var hasReproducibleMarker = _pdbDiscovery.HasReproducibleMarker(assemblyPath);
@@ -206,9 +267,11 @@ public class PackageAnalysisPipeline
                 _console.MarkupLine("  [green]\u2713 Found reproducible/deterministic marker[/]");
             }
 
+            ledger.Recorded(ReconstructionLedger.CategorySymbols, "embedded PDB",
+                "shipped inside the assembly itself, so it is unambiguously the one for these bytes");
             var metadata = await _pdbReader.ExtractMetadataAsync(assemblyPath, null, hasReproducibleMarker, cancellationToken);
             using var pdbHandle = GetPdbMetadataReader(assemblyPath, null);
-            await SaveMetadataAsync(metadata, assemblyPath, pdbHandle?.Reader, workingDirectory);
+            await SaveMetadataAsync(metadata, assemblyPath, pdbHandle?.Reader, workingDirectory, ledger);
             return;
         }
 
@@ -230,12 +293,17 @@ public class PackageAnalysisPipeline
         if (pdbPath != null)
         {
             _console.MarkupLine($"  [green]\u2713 Found external PDB:[/] [cyan]{Path.GetFileName(pdbPath)}[/]");
+            ledger.Recorded(ReconstructionLedger.CategorySymbols, Path.GetFileName(pdbPath),
+                "external PDB from the symbol package or a symbol server");
             var metadata = await _pdbReader.ExtractMetadataAsync(assemblyPath, pdbPath, hasReproducibleMarker, cancellationToken);
             using var pdbHandle = GetPdbMetadataReader(assemblyPath, pdbPath);
-            await SaveMetadataAsync(metadata, assemblyPath, pdbHandle?.Reader, workingDirectory);
+            await SaveMetadataAsync(metadata, assemblyPath, pdbHandle?.Reader, workingDirectory, ledger);
         }
         else
         {
+            ledger.Missing(ReconstructionLedger.CategorySymbols, Path.GetFileName(assemblyPath),
+                "no PDB found - the package ships neither embedded symbols nor a .snupkg, and no " +
+                "symbol server had one, so nothing about the compilation could be read");
             _console.WritePanel(
                 "\u26a0 Missing Symbols",
                 "[yellow]No PDB found[/] - cannot extract compiler arguments\n\n" +
@@ -307,7 +375,8 @@ public class PackageAnalysisPipeline
         PdbMetadata metadata,
         string assemblyPath,
         System.Reflection.Metadata.MetadataReader? pdbMetadataReader,
-        string workingDirectory)
+        string workingDirectory,
+        ReconstructionLedger ledger)
     {
         if (metadata.CompilerArguments.Count > 0)
         {
@@ -431,7 +500,13 @@ public class PackageAnalysisPipeline
                 }
             }
 
-            VerifySourceHashes(sourceFiles, sourcesDir);
+            var verification = VerifySourceHashes(sourceFiles, sourcesDir);
+            RecordSourceEvidence(sourceFiles, sourcesDir, verification, ledger);
+            if (mapper.RootPrefix != null)
+            {
+                ledger.Derived(ReconstructionLedger.CategoryOption, "/pathmap",
+                    $"project root '{mapper.RootPrefix}' derived from the recorded document paths");
+            }
 
             var manifest = new SourceManifest(
                 sourceFiles.Select(sf => new SourceManifestEntry(
@@ -451,8 +526,10 @@ public class PackageAnalysisPipeline
     /// have compiled a CRLF checkout). Files that still mismatch will produce a different PDB \u2014
     /// and through the PdbChecksum debug entry a different assembly \u2014 so they are called out.
     /// </summary>
-    private void VerifySourceHashes(List<SourceFileInfo> sourceFiles, string sourcesDir)
+    private Dictionary<string, SourceHashVerification> VerifySourceHashes(
+        List<SourceFileInfo> sourceFiles, string sourcesDir)
     {
+        var results = new Dictionary<string, SourceHashVerification>(StringComparer.Ordinal);
         var fixedCount = 0;
         var mismatched = new List<string>();
 
@@ -465,6 +542,7 @@ public class PackageAnalysisPipeline
             }
 
             var result = LineEndingNormalizer.VerifyAndFix(filePath, sourceFile.Hash, sourceFile.HashAlgorithm);
+            results[sourceFile.Path] = result;
             if (result == SourceHashVerification.Fixed)
             {
                 fixedCount++;
@@ -488,5 +566,80 @@ public class PackageAnalysisPipeline
         {
             _console.MarkupLine($"  [yellow]\u26a0[/] ... and {mismatched.Count - 5} more source checksum mismatches");
         }
+
+        return results;
     }
+
+    /// <summary>
+    /// Records how each source document was obtained, judged by evidence rather than by which
+    /// code path produced it: bytes that hash to the checksum in the PDB Documents table *are*
+    /// the original input, whether they came from the embedded blob or from Source Link. Bytes
+    /// that do not are a substitution (decompiled output, or a different revision of the file),
+    /// and that is what makes a byte-for-byte rebuild impossible rather than merely unproven.
+    /// </summary>
+    private static void RecordSourceEvidence(
+        List<SourceFileInfo> sourceFiles,
+        string sourcesDir,
+        Dictionary<string, SourceHashVerification> verification,
+        ReconstructionLedger ledger)
+    {
+        var embedded = 0;
+        var downloaded = 0;
+        var problems = new List<(InputEvidence Evidence, string Name, string Detail)>();
+
+        foreach (var sourceFile in sourceFiles)
+        {
+            var name = sourceFile.LocalPath ?? sourceFile.Path;
+            if (!File.Exists(Path.Combine(sourcesDir, sourceFile.LocalPath!)))
+            {
+                problems.Add((InputEvidence.Missing, name,
+                    "neither embedded in the PDB nor available from Source Link"));
+                continue;
+            }
+
+            switch (verification.GetValueOrDefault(sourceFile.Path))
+            {
+                case SourceHashVerification.Match:
+                case SourceHashVerification.Fixed:
+                    if (sourceFile.IsEmbedded)
+                    {
+                        embedded++;
+                    }
+                    else
+                    {
+                        downloaded++;
+                    }
+                    break;
+                case SourceHashVerification.Mismatch:
+                    problems.Add((InputEvidence.Substituted, name,
+                        "content does not hash to the recorded checksum - decompiled, or a different revision"));
+                    break;
+                default:
+                    problems.Add((InputEvidence.Assumed, name,
+                        "the PDB recorded no checksum for this document, so the content cannot be verified"));
+                    break;
+            }
+        }
+
+        ledger.Recorded(ReconstructionLedger.CategorySource, "embedded in PDB",
+            "extracted from the PDB and hashed to the recorded checksum", embedded);
+        ledger.Recorded(ReconstructionLedger.CategorySource, "from Source Link",
+            "downloaded and hashed to the recorded checksum", downloaded);
+
+        foreach (var (evidence, name, detail) in problems.Take(MaxIndividualEntries))
+        {
+            ledger.Add(ReconstructionLedger.CategorySource, name, evidence, detail);
+        }
+        foreach (var group in problems.Skip(MaxIndividualEntries).GroupBy(p => p.Evidence))
+        {
+            ledger.Add(ReconstructionLedger.CategorySource, $"{group.Count()} further document(s)",
+                group.Key, group.First().Detail, group.Count());
+        }
+    }
+
+    /// <summary>
+    /// How many individually-named problem entries the ledger carries before rolling the rest
+    /// up. A package recovered entirely by decompilation would otherwise list every document.
+    /// </summary>
+    private const int MaxIndividualEntries = 20;
 }

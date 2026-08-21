@@ -69,17 +69,21 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
             // No SourceLink mappings, check if we should decompile missing files
             if (nonEmbeddedFiles.Count > 0 && assemblyPath != null && _decompiler != null)
             {
-                var missingFiles = nonEmbeddedFiles.Select(sf => sf.Path).ToList();
+                _console.MarkupLine($"  [yellow]⚠[/] {nonEmbeddedFiles.Count} source files not available via SourceLink");
                 var decompiledCount = await _decompiler.DecompileMissingFilesAsync(
                     assemblyPath,
-                    missingFiles,
+                    nonEmbeddedFiles,
                     pdbMetadataReader,
                     destinationDirectory,
+                    // No SourceLink mappings at all - but a PDB can embed some documents and
+                    // leave the rest to SourceLink, and an embedded document already defines its
+                    // types. Only when *every* document of the compilation is missing is the
+                    // decompiler free to place types that have no debug info of their own.
+                    allDocumentsMissing: nonEmbeddedFiles.Count == sourceFiles.Count,
                     cancellationToken);
-                
+
                 if (decompiledCount > 0)
                 {
-                    _console.MarkupLine($"  [yellow]⚠[/] {missingFiles.Count} source files not available via SourceLink");
                     _console.MarkupLine($"  [cyan]→[/] Decompiled {decompiledCount} missing file(s) from assembly");
                 }
                 
@@ -179,11 +183,16 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
             {
                 _console.MarkupLine($"  [cyan]→[/] Attempting to decompile {actuallyMissing.Count} missing file(s) from assembly...");
                 
+                var missingSet = actuallyMissing.ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var decompiledCount = await _decompiler.DecompileMissingFilesAsync(
                     assemblyPath,
-                    actuallyMissing,
+                    nonEmbeddedFiles.Where(sf => missingSet.Contains(sf.Path)).ToList(),
                     pdbMetadataReader,
                     destinationDirectory,
+                    // Documents the PDB embedded were written before this ran, so they count as
+                    // recovered: any of them and the decompiler must not place type definitions
+                    // that have no debug info, or it duplicates what an embedded file declares.
+                    allDocumentsMissing: missingSet.Count == sourceFiles.Count,
                     cancellationToken);
                 
                 if (decompiledCount > 0)

@@ -31,7 +31,7 @@ public class ProcessPackageCommandHandler
         {
             DisplayHeader(command.PackageId, command.Version);
 
-            var result = await _pipeline.AnalyzeAsync(command.PackageId, command.Version, cancellationToken);
+            var result = await _pipeline.AnalyzeAsync(command.PackageId, command.Version, command.Assembly, cancellationToken);
             if (result == null)
             {
                 return null;
@@ -59,7 +59,9 @@ public class ProcessPackageCommandHandler
                 result.WorkingDirectory,
                 Directory.GetCurrentDirectory(),
                 result.SelectedTfm,
-                result.SelectedAssemblies);
+                result.SelectedAssemblies,
+                result.Ledger,
+                command.RunGenerators);
 
             if (!File.Exists(complogFilePath))
             {
