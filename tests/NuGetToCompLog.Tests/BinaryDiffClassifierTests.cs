@@ -44,6 +44,64 @@ public class BinaryDiffClassifierTests
         }
     }
 
+    /// <summary>
+    /// The linker lays mapped field data (array initializers) out immediately after the debug
+    /// data, so it moves whenever the embedded PDB changes size. Moving is derived; *changing*
+    /// is not - a different initializer is different content and has to be reported, however
+    /// much the PDB around it also drifted.
+    /// </summary>
+    [Fact]
+    public void ChangedMappedFieldDataIsRealDriftEvenWhenTheEmbeddedPdbResizes()
+    {
+        var directory = Directory.CreateTempSubdirectory("bindiff-fielddata").FullName;
+        try
+        {
+            var withoutEmbedding = Path.Combine(directory, "a.dll");
+            var withEmbedding = Path.Combine(directory, "b.dll");
+            Emit(withoutEmbedding, embedSource: false);
+            Emit(withEmbedding, embedSource: true);
+
+            // Rewrite one element of the initializer blob in place. Changing the array in source
+            // would also change the metadata (Roslyn names the field after the hash of its data),
+            // which the comparison would catch regardless of what happens inside .text.
+            var bytes = File.ReadAllBytes(withEmbedding);
+            var initializer = Enumerable.Range(1, 8).SelectMany(BitConverter.GetBytes).ToArray();
+            var offset = IndexOf(bytes, initializer);
+            AssertLiesAfterTheEmbeddedPdb(withEmbedding, offset);
+            bytes[offset] = 0x42;
+            File.WriteAllBytes(withEmbedding, bytes);
+
+            var result = BinaryDiffClassifier.CompareAssemblies(withoutEmbedding, withEmbedding);
+
+            Assert.False(result.DerivedOnly);
+            Assert.NotEmpty(result.RealDifferences);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static int IndexOf(byte[] haystack, byte[] needle)
+    {
+        var index = haystack.AsSpan().IndexOf(needle);
+        Assert.True(index >= 0, "the array initializer blob is not in the emitted assembly");
+        return index;
+    }
+
+    /// <summary>
+    /// Guards the premise: the bytes under test have to sit in the stretch of .text that the
+    /// PDB size change relocates, i.e. after the embedded blob.
+    /// </summary>
+    private static void AssertLiesAfterTheEmbeddedPdb(string path, int offset)
+    {
+        using var reader = new PEReader(File.OpenRead(path));
+        var embedded = reader.ReadDebugDirectory()
+            .Single(e => e.Type == DebugDirectoryEntryType.EmbeddedPortablePdb);
+        Assert.True(offset > embedded.DataPointer + embedded.DataSize,
+            $"expected offset {offset} to fall after the embedded PDB blob");
+    }
+
     private static void Emit(string outputPath, bool embedSource)
     {
         // Comment padding that barely compresses, so embedding it grows .text past the next

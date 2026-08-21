@@ -67,13 +67,22 @@ public static class SourceGeneratorAcquisitionService
         @"GeneratedCode(?:Attribute)?\s*\(\s*""[^""]*""\s*,\s*""(?<ver>[^""]+)""",
         RegexOptions.Compiled);
 
+    /// <param name="runGenerators">
+    /// Whether generator assemblies may be loaded and run in this process. Proving a candidate
+    /// regenerates the recorded documents means executing package-controlled code with the
+    /// caller's privileges - the same exposure as building a project that references the
+    /// generator, but the caller only asked to read a package, so it is worth being able to
+    /// turn off. With it off the generated documents stay plain source files, which the ledger
+    /// records as a substitution.
+    /// </param>
     public static async Task<GeneratorPlan?> TryPlanAsync(
         string workingDirectory,
         SourceManifest manifest,
         Dictionary<string, string> argsDict,
         Dictionary<string, string> acquiredReferences,
         string assemblyName,
-        ReconstructionLedger? ledger = null)
+        ReconstructionLedger? ledger = null,
+        bool runGenerators = true)
     {
         var sourcesDir = Path.Combine(workingDirectory, "sources");
         var byAssembly = new Dictionary<string, List<GeneratedDocument>>();
@@ -174,6 +183,20 @@ public static class SourceGeneratorAcquisitionService
             }
             return result;
         }
+
+        if (!runGenerators)
+        {
+            AnsiConsole.MarkupLine(
+                $"  [yellow]⚠[/] Generator execution is off, so the {byAssembly.Count} generator(s) behind these " +
+                "documents cannot be identified - the documents stay plain source files");
+            return Done(null);
+        }
+
+        // Say plainly what is about to happen: proving a candidate means running code from a
+        // package in this process, with this user's privileges.
+        AnsiConsole.MarkupLine(
+            "  [dim]Candidate generators are executed here to prove they reproduce the recorded " +
+            "documents; pass --skip-generators to keep package code out of this process[/]");
 
         foreach (var (generatorAssembly, docs) in byAssembly)
         {

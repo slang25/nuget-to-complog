@@ -75,8 +75,11 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
                     nonEmbeddedFiles,
                     pdbMetadataReader,
                     destinationDirectory,
-                    // No SourceLink mappings at all: nothing else will define these types.
-                    allDocumentsMissing: true,
+                    // No SourceLink mappings at all - but a PDB can embed some documents and
+                    // leave the rest to SourceLink, and an embedded document already defines its
+                    // types. Only when *every* document of the compilation is missing is the
+                    // decompiler free to place types that have no debug info of their own.
+                    allDocumentsMissing: nonEmbeddedFiles.Count == sourceFiles.Count,
                     cancellationToken);
 
                 if (decompiledCount > 0)
@@ -186,7 +189,10 @@ public class HttpSourceFileDownloader : ISourceFileDownloader
                     nonEmbeddedFiles.Where(sf => missingSet.Contains(sf.Path)).ToList(),
                     pdbMetadataReader,
                     destinationDirectory,
-                    allDocumentsMissing: missingSet.Count == nonEmbeddedFiles.Count,
+                    // Documents the PDB embedded were written before this ran, so they count as
+                    // recovered: any of them and the decompiler must not place type definitions
+                    // that have no debug info, or it duplicates what an embedded file declares.
+                    allDocumentsMissing: missingSet.Count == sourceFiles.Count,
                     cancellationToken);
                 
                 if (decompiledCount > 0)

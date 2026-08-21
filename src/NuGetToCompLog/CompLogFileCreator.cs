@@ -21,7 +21,8 @@ public class CompLogFileCreator
         string outputDirectory,
         string? overrideTfm = null,
         List<string>? selectedAssemblies = null,
-        ReconstructionLedger? ledger = null)
+        ReconstructionLedger? ledger = null,
+        bool runGenerators = true)
     {
         ledger ??= new ReconstructionLedger();
         AnsiConsole.MarkupLine("");
@@ -102,7 +103,8 @@ public class CompLogFileCreator
                 "read from the PDB's compilation-options custom debug information",
                 argsDict.Count(kvp => kvp.Key != "__extra_args__"));
             ledger.Derived(ReconstructionLedger.CategoryOption, "/debug",
-                $"{debugConfig.DebugType} debug settings read from the assembly's debug directory");
+                $"{debugConfig.DebugType} debug settings - with /deterministic and /highentropyva - " +
+                "read from the assembly's debug directory and PE header");
             
             if (overrideTfm != null && overrideTfm != ExtractTargetFramework(argsDict))
             {
@@ -167,13 +169,16 @@ public class CompLogFileCreator
             {
                 generatorPlan = await Services.Generators.SourceGeneratorAcquisitionService.TryPlanAsync(
                     workingDirectory, manifest, argsDict, acquiredReferences,
-                    Path.GetFileNameWithoutExtension(assemblyPath), ledger);
+                    Path.GetFileNameWithoutExtension(assemblyPath), ledger, runGenerators);
             }
 
             var args = BuildCompilerArguments(argsDict, assemblyPath, workingDirectory, acquiredReferences, debugConfig, manifest, strongNameArgs, generatorPlan, ledger);
 
             var projectDir = Path.Combine(workingDirectory, "sources");
-            var projectFilePath = Path.Combine(projectDir, $"{packageId}.csproj");
+            // Name the call after the assembly it builds, not the package: a package shipping
+            // several assemblies is captured one at a time, and consumers (verify, above all)
+            // identify the compilation by the assembly they are comparing against.
+            var projectFilePath = Path.Combine(projectDir, $"{Path.GetFileNameWithoutExtension(assemblyPath)}.csproj");
             
             var compilerCall = new CompilerCall(
                 projectFilePath: projectFilePath,
@@ -389,6 +394,26 @@ public class CompLogFileCreator
         var destination = Path.Combine(workingDirectory, "sources", normalizedPdbPath[manifest.PathMapRoot.Length..]);
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         File.Copy(originalPdb, destination, overwrite: true);
+    }
+
+    /// <summary>
+    /// The /filealign: value the original build used, taken from the FileAlignment field of the
+    /// shipped PE (csc writes the flag straight into it). Null when the assembly cannot be read,
+    /// or when its alignment is not one csc accepts - an assembly some other tool produced.
+    /// </summary>
+    private static int? ReadFileAlignment(string assemblyPath)
+    {
+        try
+        {
+            using var stream = File.OpenRead(assemblyPath);
+            using var peReader = new System.Reflection.PortableExecutable.PEReader(stream);
+            var alignment = peReader.PEHeaders.PEHeader?.FileAlignment;
+            return alignment is 512 or 1024 or 2048 or 4096 or 8192 ? alignment : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -619,8 +644,21 @@ public class CompLogFileCreator
         var debugFlags = debugConfig.ToCompilerFlags(pdbOutputPath).Where(f => !f.StartsWith("/highentropyva"));
         args.AddRange(debugFlags);
         
-        // /filealign:
-        args.Add("/filealign:512");
+        // /filealign: is not in the options blob either, but the value csc was given is the
+        // FileAlignment field of the PE it produced, so the shipped assembly states it outright.
+        var fileAlignment = ReadFileAlignment(assemblyPath);
+        args.Add($"/filealign:{fileAlignment ?? 512}");
+        if (fileAlignment != null)
+        {
+            ledger?.Inferred(ReconstructionLedger.CategoryOption, "/filealign",
+                $"{fileAlignment} read from the shipped assembly's PE optional header");
+        }
+        else
+        {
+            ledger?.Assumed(ReconstructionLedger.CategoryOption, "/filealign",
+                "the shipped assembly's PE optional header records no alignment csc could have " +
+                "been given; using its 512 default");
+        }
         
         // /optimize (and /debug+ when the original recorded DebugPlusMode)
         if (argsDict.TryGetValue("optimization", out var optimization))
@@ -687,8 +725,12 @@ public class CompLogFileCreator
             args.Add($"/target:{target}");
         }
         
-        // /utf8output
+        // /utf8output sets the encoding csc writes its *diagnostics* in; it reaches neither the
+        // assembly nor the PDB, so passing it unconditionally cannot make the rebuild differ.
         args.Add("/utf8output");
+        ledger?.Derived(ReconstructionLedger.CategoryOption, "/utf8output",
+            "not recorded anywhere; it only sets the encoding of csc's console output, so it " +
+            "cannot change the emitted bytes");
         
         // /deterministic+ - essential for reproducible builds (moved here to match original order)
         if (debugConfig.HasReproducible)
@@ -702,8 +744,14 @@ public class CompLogFileCreator
             args.Add($"/langversion:{langVersion}");
         }
         
-        // /features:strict
+        // /features:strict is what the .NET SDK puts in $(Features) by default, and csc records
+        // no /features: at all - so this is a convention, not a reading. It is safe to apply
+        // blind because strict only tightens which diagnostics are reported: getting it wrong
+        // fails the rebuild outright rather than quietly changing the emitted bytes.
         args.Add("/features:strict");
+        ledger?.Derived(ReconstructionLedger.CategoryOption, "/features:strict",
+            "the .NET SDK's default $(Features); csc records no /features:, but strict changes " +
+            "only diagnostics, so it cannot alter the emitted bytes");
 
         // The PDB's compilation-options blob does not record /features:, so nullablePublicOnly
         // has to be inferred from the shipped assembly. Without it the rebuild annotates every

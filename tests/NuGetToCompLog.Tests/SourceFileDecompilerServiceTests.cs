@@ -136,6 +136,46 @@ public class SourceFileDecompilerServiceTests
     }
 
     /// <summary>
+    /// The split is just as real when the recovered document holds most of the methods: the
+    /// members that lived in the missing part are lost either way, so the caller has to hear
+    /// about it rather than be handed a file that silently drops them.
+    /// </summary>
+    [Fact]
+    public async Task PartialTypeIsReportedAsSplitEvenWhenTheRecoveredDocumentWinsTheVote()
+    {
+        var directory = Directory.CreateTempSubdirectory("decompile-split-recovered").FullName;
+        try
+        {
+            // Part2 is the one we have, and it holds most of the methods - so it wins the vote.
+            var (assemblyPath, pdbPath) = EmitTrees(directory, "SampleSplitRecovered",
+            [
+                ("/src/Part1.cs", "public partial class Split { public int A() { return 1; } }"),
+                ("/src/Part2.cs", "public partial class Split { public int B() { return 2; } public int C() { return 3; } }"),
+            ]);
+            using var pdbStream = File.OpenRead(pdbPath);
+            using var pdbProvider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
+
+            var console = new RecordingConsole();
+            var output = Path.Combine(directory, "out");
+            await new SourceFileDecompilerService(new FileSystemService(), console)
+                .DecompileMissingFilesAsync(
+                    assemblyPath,
+                    [new SourceFileInfo("/src/Part1.cs", null, false, null, LocalPath: "Part1.cs")],
+                    pdbProvider.GetMetadataReader(),
+                    output,
+                    allDocumentsMissing: false);
+
+            var part1 = await File.ReadAllTextAsync(Path.Combine(output, "Part1.cs"));
+            Assert.DoesNotContain("class Split", part1);
+            Assert.Contains(console.Lines, line => line.Contains("Split") && line.Contains("left unrecovered"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
     /// An assembly whose source declares no method bodies (enums, interfaces) has no method
     /// debug info, so no document can claim ownership by vote. Every document is still missing,
     /// so the types have to land somewhere rather than every file being a placeholder comment.
@@ -216,6 +256,20 @@ public class SourceFileDecompilerServiceTests
         }
 
         return (assemblyPath, pdbPath);
+    }
+
+    private sealed class RecordingConsole : IConsoleWriter
+    {
+        public List<string> Lines { get; } = [];
+        public void MarkupLine(string markup) => Lines.Add(markup);
+        public void WriteLine() { }
+        public void WriteException(Exception exception) { }
+        public void WritePanel(string header, string content, string? borderColor = null) { }
+        public void WriteTree(string rootLabel, Dictionary<string, List<string>> nodes) { }
+        public void WriteTable(string[] headers, List<string[]> rows) { }
+        public Task ExecuteWithStatusAsync(string status, Func<Task> action) => action();
+        public void SetIndeterminateProgress() { }
+        public void ClearProgress() { }
     }
 
     private sealed class SilentConsole : IConsoleWriter

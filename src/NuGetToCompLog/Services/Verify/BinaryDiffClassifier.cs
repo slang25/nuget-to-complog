@@ -72,12 +72,12 @@ public static class BinaryDiffClassifier
             if (originalCert is { } oc)
             {
                 ClearCertificateDirectoryEntry(maskedOriginal);
-                maskedOriginal = Splice(maskedOriginal, oc);
+                maskedOriginal = Splice(maskedOriginal, [oc]);
             }
             if (rebuiltCert is { } rc)
             {
                 ClearCertificateDirectoryEntry(maskedRebuilt);
-                maskedRebuilt = Splice(maskedRebuilt, rc);
+                maskedRebuilt = Splice(maskedRebuilt, [rc]);
             }
         }
 
@@ -90,12 +90,17 @@ public static class BinaryDiffClassifier
             !original.AsSpan(os.Start, os.Length).SequenceEqual(rebuilt.AsSpan(rs.Start, rs.Length)))
         {
             derivedDiffs.Add($"embedded portable PDB ({os.Length:N0} vs {rs.Length:N0} bytes compressed)");
+            var originalRemovals = new List<(int Start, int Length)> { os };
+            var rebuiltRemovals = new List<(int Start, int Length)> { rs };
             if (os.Length != rs.Length)
             {
                 // A size change shifts everything the linker lays out after the blob: PE size
                 // fields, the entry-point/import stub RVAs, and the .reloc fixup for the stub.
-                // Mask those and splice through to the end of the enclosing section so equal
-                // content re-aligns.
+                // Mask those, then re-align by taking each file's own blob out along with the
+                // derived tail of the enclosing section. Splicing straight through from the blob
+                // to the end of the section would be simpler, but the mapped field data (array
+                // initializers, see the FieldRVA note below) sits between the blob and that tail:
+                // removing it would let an initializer change pass as derived-only drift.
                 foreach (var (start, length) in GetLayoutDerivedRegions(original))
                 {
                     maskedOriginal.AsSpan(start, length).Clear();
@@ -104,11 +109,12 @@ public static class BinaryDiffClassifier
                 {
                     maskedRebuilt.AsSpan(start, length).Clear();
                 }
-                os = ExtendToSectionEnd(original, os);
-                rs = ExtendToSectionEnd(rebuilt, rs);
+                var (originalDerived, rebuiltDerived) = FindDerivedRegions(original, os, rebuilt, rs);
+                originalRemovals.AddRange(originalDerived);
+                rebuiltRemovals.AddRange(rebuiltDerived);
             }
-            maskedOriginal = Splice(maskedOriginal, os);
-            maskedRebuilt = Splice(maskedRebuilt, rs);
+            maskedOriginal = Splice(maskedOriginal, originalRemovals);
+            maskedRebuilt = Splice(maskedRebuilt, rebuiltRemovals);
             spliced.Add("the embedded PDB");
         }
 
@@ -221,31 +227,184 @@ public static class BinaryDiffClassifier
         }
     }
 
-    private static (int Start, int Length) ExtendToSectionEnd(byte[] file, (int Start, int Length) span)
+    /// <summary>
+    /// The regions to drop from each file's <c>.text</c> along with its embedded PDB blob, so
+    /// that removing two differently-sized blobs leaves the same number of section bytes on both
+    /// sides - without discarding content in the process.
+    ///
+    /// The compiler lays the section out as [... metadata][debug directory + PDB blob][import
+    /// table + hint/name table + startup stub][mapped field data][padding to the file alignment].
+    /// The import-table stretch is linker bookkeeping full of RVAs that move with the blob, so it
+    /// goes; the mapped field data behind it is real content (array initializers), so it stays
+    /// and the trailing zero padding absorbs the rest of the size difference instead. Each side
+    /// keeps as many bytes as the *longer* of the two contents needs, so a genuine content-size
+    /// change still shows up rather than being padded away.
+    /// </summary>
+    private static (List<(int Start, int Length)> Original, List<(int Start, int Length)> Rebuilt) FindDerivedRegions(
+        byte[] original, (int Start, int Length) originalBlob,
+        byte[] rebuilt, (int Start, int Length) rebuiltBlob)
+    {
+        var originalSection = FindSection(original, originalBlob.Start);
+        var rebuiltSection = FindSection(rebuilt, rebuiltBlob.Start);
+        if (originalSection == null || rebuiltSection == null)
+        {
+            return ([], []);
+        }
+
+        var originalStub = FindStubRegion(original, originalSection.Value, originalBlob);
+        var rebuiltStub = FindStubRegion(rebuilt, rebuiltSection.Value, rebuiltBlob);
+        var originalKept = originalSection.Value.Length - originalBlob.Length - (originalStub?.Length ?? 0);
+        var rebuiltKept = rebuiltSection.Value.Length - rebuiltBlob.Length - (rebuiltStub?.Length ?? 0);
+
+        var originalPadding = TrailingZeros(original, originalSection.Value, ContentFloor(originalBlob, originalStub));
+        var rebuiltPadding = TrailingZeros(rebuilt, rebuiltSection.Value, ContentFloor(rebuiltBlob, rebuiltStub));
+        var target = Math.Max(originalKept - originalPadding, rebuiltKept - rebuiltPadding);
+
+        // Never trim more than the zeros actually there: if the two sections cannot be brought
+        // to the same length the caller reports a size difference, which is the honest answer.
+        var dropOriginal = Math.Clamp(originalKept - target, 0, originalPadding);
+        var dropRebuilt = Math.Clamp(rebuiltKept - target, 0, rebuiltPadding);
+
+        return (Regions(originalSection.Value, originalStub, dropOriginal),
+                Regions(rebuiltSection.Value, rebuiltStub, dropRebuilt));
+
+        static int ContentFloor((int Start, int Length) blob, (int Start, int Length)? stub) =>
+            Math.Max(blob.Start + blob.Length, (stub?.Start ?? 0) + (stub?.Length ?? 0));
+
+        static List<(int Start, int Length)> Regions(
+            (int Start, int Length) section, (int Start, int Length)? stub, int padding)
+        {
+            var regions = new List<(int Start, int Length)>();
+            if (stub is { } s)
+            {
+                regions.Add(s);
+            }
+            if (padding > 0)
+            {
+                regions.Add((section.Start + section.Length - padding, padding));
+            }
+            return regions;
+        }
+    }
+
+    /// <summary>
+    /// The import table, hint/name table and runtime startup stub: everything from the import
+    /// directory up to the mapped field data (or to the end of the section when the assembly has
+    /// none). Null when the assembly needs no startup stub, or when the import table is not in
+    /// the same section behind the embedded PDB.
+    /// </summary>
+    private static (int Start, int Length)? FindStubRegion(
+        byte[] file, (int Start, int Length) section, (int Start, int Length) blob)
+    {
+        try
+        {
+            using var peReader = new PEReader(System.Collections.Immutable.ImmutableArray.Create(file));
+            var headers = peReader.PEHeaders;
+            var sectionEnd = section.Start + section.Length;
+            if (headers.PEHeader!.ImportTableDirectory.Size == 0 ||
+                !headers.TryGetDirectoryOffset(headers.PEHeader.ImportTableDirectory, out var start) ||
+                start < blob.Start + blob.Length || start >= sectionEnd)
+            {
+                return null;
+            }
+
+            var end = FindMappedFieldDataOffset(file, peReader, section, start) ?? sectionEnd;
+            return end > start ? (start, end - start) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Where the mapped static field data starts, taken from the lowest FieldRVA the metadata
+    /// records. Null when the assembly maps no field data behind <paramref name="after"/>.
+    /// </summary>
+    private static int? FindMappedFieldDataOffset(
+        byte[] file, PEReader peReader, (int Start, int Length) section, int after)
+    {
+        var headers = peReader.PEHeaders;
+        var metadataReader = peReader.GetMetadataReader();
+        var rows = metadataReader.GetTableRowCount(TableIndex.FieldRva);
+        if (rows == 0)
+        {
+            return null;
+        }
+
+        var tableStart = headers.MetadataStartOffset + metadataReader.GetTableMetadataOffset(TableIndex.FieldRva);
+        var rowSize = metadataReader.GetTableRowSize(TableIndex.FieldRva);
+        int? lowest = null;
+        for (var row = 0; row < rows; row++)
+        {
+            // FieldRVA rows start with the four-byte RVA of the mapped data.
+            var rva = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+                file.AsSpan(tableStart + row * rowSize));
+            var index = headers.GetContainingSectionIndex(rva);
+            if (index < 0)
+            {
+                continue;
+            }
+            var containing = headers.SectionHeaders[index];
+            var offset = containing.PointerToRawData + (rva - containing.VirtualAddress);
+            if (offset > after && offset < section.Start + section.Length)
+            {
+                lowest = lowest == null ? offset : Math.Min(lowest.Value, offset);
+            }
+        }
+        return lowest;
+    }
+
+    private static (int Start, int Length)? FindSection(byte[] file, int offset)
     {
         try
         {
             using var peReader = new PEReader(System.Collections.Immutable.ImmutableArray.Create(file));
             foreach (var section in peReader.PEHeaders.SectionHeaders)
             {
-                if (section.PointerToRawData <= span.Start &&
-                    span.Start < section.PointerToRawData + section.SizeOfRawData)
+                if (section.PointerToRawData <= offset &&
+                    offset < section.PointerToRawData + section.SizeOfRawData &&
+                    section.PointerToRawData + section.SizeOfRawData <= file.Length)
                 {
-                    return (span.Start, section.PointerToRawData + section.SizeOfRawData - span.Start);
+                    return (section.PointerToRawData, section.SizeOfRawData);
                 }
             }
         }
         catch
         {
         }
-        return span;
+        return null;
     }
 
-    private static byte[] Splice(byte[] file, (int Start, int Length) span)
+    /// <summary>
+    /// How many zero bytes the section ends with, counting no further back than
+    /// <paramref name="floor"/> - the end of the last region that is being removed anyway, in
+    /// front of which nothing can be padding.
+    /// </summary>
+    private static int TrailingZeros(byte[] file, (int Start, int Length) section, int floor)
     {
-        var result = new byte[file.Length - span.Length];
-        file.AsSpan(0, span.Start).CopyTo(result);
-        file.AsSpan(span.Start + span.Length).CopyTo(result.AsSpan(span.Start));
+        var limit = Math.Max(section.Start, floor);
+        var index = section.Start + section.Length;
+        while (index > limit && file[index - 1] == 0)
+        {
+            index--;
+        }
+        return section.Start + section.Length - index;
+    }
+
+    private static byte[] Splice(byte[] file, List<(int Start, int Length)> spans)
+    {
+        var ordered = spans.OrderBy(s => s.Start).ToList();
+        var result = new byte[file.Length - ordered.Sum(s => s.Length)];
+        var read = 0;
+        var write = 0;
+        foreach (var (start, length) in ordered)
+        {
+            file.AsSpan(read, start - read).CopyTo(result.AsSpan(write));
+            write += start - read;
+            read = start + length;
+        }
+        file.AsSpan(read).CopyTo(result.AsSpan(write));
         return result;
     }
 

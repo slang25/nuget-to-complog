@@ -70,6 +70,32 @@ To make rebuilds faithful, the tool:
 - reconstructs strong naming: `/publicsign` from the assembly's public key, or full signing
   when the repo commits its `.snk` (RSA signing is deterministic)
 
+### Packages that ship more than one assembly
+
+A working directory describes one compilation, so a package that ships several assemblies for the
+same target framework (NUnit's `nunit.framework.dll` next to `nunit.framework.legacy.dll`) is
+captured one at a time. The default is the assembly named after the package; `--assembly` picks
+another:
+
+```bash
+# capture the sibling instead of the assembly named after the package
+nuget-to-complog verify <package> <version> --assembly nunit.framework.legacy.dll
+```
+
+### Running source generators
+
+A generated document can only be reproduced by the generator that produced it: csc embeds the
+generated text itself, hashed with the generator's own checksum algorithm, so passing the same
+characters as a plain file yields a different PDB and a different assembly. So the tool finds the
+generator assembly the original build used and runs it — here, in this process — to prove it
+regenerates those documents byte-for-byte before attaching it as `/analyzer`.
+
+That means package-controlled code executes on your machine. It is the same exposure as building
+a project that references the generator, but you only asked to read a package, so there is a
+switch: `--skip-generators` (or `NUGET_TO_COMPLOG_SKIP_GENERATORS=1`) keeps generator code out of
+the process. The generated documents then go in as plain source files, which the ledger records as
+a substitution and which cannot reproduce the original PDB exactly.
+
 ### What the package didn't record
 
 A NuGet package is not a self-describing build. The PDB records the compiler version, the

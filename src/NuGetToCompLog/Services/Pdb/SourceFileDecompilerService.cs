@@ -272,19 +272,21 @@ public class SourceFileDecompilerService
             var owner = perDocument.OrderByDescending(kvp => kvp.Value)
                 .ThenBy(kvp => kvp.Key, StringComparer.Ordinal)
                 .First().Key;
-            if (!missing.Contains(owner))
-            {
-                continue;
-            }
             // A partial type split across a recovered document and a missing one is already
             // declared by the file we have. The decompiler only emits whole types, so writing
             // it here would repeat every member the recovered part declares (CS0111) and
             // redeclare the type without `partial` (CS0260) - the rebuild would not even
             // parse. Leaving it out costs the members that lived in the missing file, which
-            // the caller reports.
-            if (perDocument.Keys.Any(document => !missing.Contains(document)))
+            // the caller reports - and it costs them whichever side won the vote, so the split
+            // is detected before the winner is looked at.
+            if (perDocument.Keys.Any(missing.Contains) &&
+                perDocument.Keys.Any(document => !missing.Contains(document)))
             {
                 splitTypes.Add(GetTypeName(peMetadata, type));
+                continue;
+            }
+            if (!missing.Contains(owner))
+            {
                 continue;
             }
             if (!result.TryGetValue(owner, out var list))

@@ -26,9 +26,15 @@ public class VerifyCommandHandler
     }
 
     /// <returns>0 = byte-for-byte match, 2 = content match with derived-field drift, 1 = real differences or failure.</returns>
-    public async Task<int> HandleAsync(string packageId, string? version, bool fetchCompiler = false, CancellationToken cancellationToken = default)
+    public async Task<int> HandleAsync(
+        string packageId,
+        string? version,
+        bool fetchCompiler = false,
+        string? assembly = null,
+        bool runGenerators = true,
+        CancellationToken cancellationToken = default)
     {
-        var result = await _pipeline.AnalyzeAsync(packageId, version, cancellationToken);
+        var result = await _pipeline.AnalyzeAsync(packageId, version, assembly, cancellationToken);
         if (result == null || result.CompilerArgsFile == null)
         {
             _console.MarkupLine("[red]✗[/] Cannot verify - no compiler arguments could be extracted from the package");
@@ -42,7 +48,8 @@ public class VerifyCommandHandler
             result.WorkingDirectory,
             result.SelectedTfm,
             result.SelectedAssemblies,
-            result.Ledger);
+            result.Ledger,
+            runGenerators);
 
         if (!File.Exists(complogPath))
         {
@@ -80,25 +87,32 @@ public class VerifyCommandHandler
         // Export the complog to a build-able directory. Everything from here on uses only the
         // complog contents - this is what proves the complog alone reproduces the assembly.
         var exportDir = Path.Combine(result.WorkingDirectory, "verify-export");
-        // A package can ship several assemblies (NUnit: nunit.framework + nunit.framework.legacy),
-        // giving the complog one compilation each. Export the one that actually built the
-        // assembly being compared, or the comparison reports one assembly's bytes against
-        // another's and every difference is meaningless.
+        // The pipeline analyzed exactly one assembly and put it first, and the complog describes
+        // that one - a package shipping several (NUnit: nunit.framework + nunit.framework.legacy)
+        // is captured one at a time, since a single working directory holds a single
+        // compilation's arguments and sources. Match the call to the assembly by name anyway, so
+        // this can never compare one assembly's bytes against another's compilation.
         var originalAssembly = result.SelectedAssemblies.First();
         using (var reader = CompilerLogReader.Create(complogPath))
         {
             var compilerCalls = reader.ReadAllCompilerCalls();
             var assemblyName = Path.GetFileNameWithoutExtension(originalAssembly);
             var compilerCall = compilerCalls.FirstOrDefault(c =>
-                    string.Equals(Path.GetFileNameWithoutExtension(c.ProjectFileName), assemblyName,
-                        StringComparison.OrdinalIgnoreCase))
-                ?? compilerCalls.First();
-
-            if (compilerCalls.Count > 1)
+                string.Equals(Path.GetFileNameWithoutExtension(c.ProjectFileName), assemblyName,
+                    StringComparison.OrdinalIgnoreCase));
+            if (compilerCall == null)
             {
                 _console.MarkupLine(
-                    $"  [dim]Package builds {compilerCalls.Count} assemblies; verifying " +
-                    $"{Path.GetFileName(originalAssembly)}[/]");
+                    $"[red]\u2717[/] The complog holds no compilation for {Path.GetFileName(originalAssembly)} " +
+                    $"(found: {string.Join(", ", compilerCalls.Select(c => Path.GetFileNameWithoutExtension(c.ProjectFileName)))})");
+                return 1;
+            }
+
+            if (result.SelectedAssemblies.Count > 1)
+            {
+                _console.MarkupLine(
+                    $"  [dim]Package ships {result.SelectedAssemblies.Count} assemblies for this TFM; verifying " +
+                    $"{Path.GetFileName(originalAssembly)} (pass --assembly to verify another)[/]");
             }
 
             var compilerDir = Path.GetDirectoryName(cscPath)!;

@@ -49,10 +49,16 @@ public class PackageAnalysisPipeline
     /// <summary>
     /// Analyzes a NuGet package: downloads, extracts, reads PDB metadata,
     /// downloads source files, and returns a result capturing all artifacts.
+    ///
+    /// The working directory describes exactly one compilation - one compiler-arguments.txt,
+    /// one metadata-references.json, one source manifest, one sources/ tree - so when a package
+    /// ships several assemblies for the chosen TFM only one of them is analyzed, and
+    /// <paramref name="assemblyName"/> says which.
     /// </summary>
     public async Task<PackageExtractionResult?> AnalyzeAsync(
         string packageId,
         string? version,
+        string? assemblyName = null,
         CancellationToken cancellationToken = default)
     {
         var ledger = new ReconstructionLedger();
@@ -88,34 +94,60 @@ public class PackageAnalysisPipeline
         DisplayAssembliesTree(allAssemblies, extractPath);
 
         var (selectedAssemblies, selectedTfm) = _tfmSelector.SelectBestTargetFramework(allAssemblies, extractPath);
-        ledger.Describe(
-            $"{package.Id}/{package.Version}",
-            selectedTfm,
-            selectedAssemblies.Count > 0 ? Path.GetFileName(selectedAssemblies[0]) : null);
         if (selectedTfm != null)
         {
             _console.MarkupLine($"[green]\u2713[/] Selected best TFM: [cyan]{selectedTfm}[/] with [yellow]{selectedAssemblies.Count}[/] assemblies");
             _console.WriteLine();
         }
 
+        // One working directory describes one compilation, so pick the assembly it will describe
+        // and put it first - everything downstream (the complog's single compiler call, the
+        // verify comparison) reads selectedAssemblies[0] and would otherwise risk pairing one
+        // assembly's bytes with another's compiler arguments.
+        var primaryAssembly = SelectPrimaryAssembly(selectedAssemblies, packageId, assemblyName);
+        if (primaryAssembly == null && selectedAssemblies.Count > 0)
+        {
+            _console.MarkupLine(
+                $"[red]\u2717[/] No assembly named [cyan]{assemblyName}[/] in this package" +
+                (selectedTfm != null ? $" for [cyan]{selectedTfm}[/]" : "") + ". Available: " +
+                string.Join(", ", selectedAssemblies.Select(Path.GetFileName)));
+            return null;
+        }
+        selectedAssemblies = selectedAssemblies
+            .OrderByDescending(a => a == primaryAssembly)
+            .ToList();
+        if (primaryAssembly != null && selectedAssemblies.Count > 1)
+        {
+            _console.MarkupLine(
+                $"[yellow]\u26a0[/] This TFM ships {selectedAssemblies.Count} assemblies; only " +
+                $"[cyan]{Path.GetFileName(primaryAssembly)}[/] is analyzed - the complog describes it alone");
+            _console.MarkupLine(
+                "   [dim]Pass --assembly <name.dll> to capture one of the others: " +
+                string.Join(", ", selectedAssemblies.Skip(1).Select(a => Path.GetFileName(a))) + "[/]");
+            _console.WriteLine();
+        }
+
+        ledger.Describe(
+            $"{package.Id}/{package.Version}", selectedTfm,
+            primaryAssembly != null ? Path.GetFileName(primaryAssembly) : null);
+
         // Handle PDB discovery and symbols download
-        var hasEmbeddedPdb = selectedAssemblies.Any(a => _pdbDiscovery.HasEmbeddedPdb(a));
+        var hasEmbeddedPdb = primaryAssembly != null && _pdbDiscovery.HasEmbeddedPdb(primaryAssembly);
         if (!hasEmbeddedPdb)
         {
             await TryDownloadSymbolsAsync(package, workingDirectory, cancellationToken);
         }
         else
         {
-            _console.MarkupLine("[dim]\u26a0 Skipping symbols package download - selected assemblies have embedded PDBs[/]");
+            _console.MarkupLine("[dim]\u26a0 Skipping symbols package download - the selected assembly has an embedded PDB[/]");
             _console.WriteLine();
         }
 
-        // Process each assembly
-        _console.MarkupLine($"  [cyan]\u2192[/] Processing {selectedAssemblies.Count} assembly/assemblies from TFM: [yellow]{selectedTfm}[/]");
-        foreach (var assemblyPath in selectedAssemblies)
+        if (primaryAssembly != null)
         {
-            _console.MarkupLine($"     Assembly: [dim]{Path.GetFileName(assemblyPath)}[/]");
-            await ProcessAssemblyAsync(assemblyPath, workingDirectory, ledger, cancellationToken);
+            _console.MarkupLine(
+                $"  [cyan]\u2192[/] Processing [dim]{Path.GetFileName(primaryAssembly)}[/] from TFM: [yellow]{selectedTfm}[/]");
+            await ProcessAssemblyAsync(primaryAssembly, workingDirectory, ledger, cancellationToken);
             _console.WriteLine();
         }
 
@@ -135,6 +167,27 @@ public class PackageAnalysisPipeline
             SourcesDirectory: sourcesDir,
             ResourcesDirectory: Directory.Exists(resourcesDir) ? resourcesDir : null,
             Ledger: ledger);
+    }
+
+    /// <summary>
+    /// The one assembly this run captures. Defaults to the one named after the package (NUnit's
+    /// nunit.framework.dll sits beside nunit.framework.legacy.dll, and only one of them is what
+    /// the package is), falling back to the first. A caller-supplied name wins, matched with or
+    /// without the .dll suffix; null means the caller asked for an assembly the package has not
+    /// got, or there are no assemblies at all.
+    /// </summary>
+    private static string? SelectPrimaryAssembly(List<string> assemblies, string packageId, string? assemblyName)
+    {
+        if (assemblyName != null)
+        {
+            var wanted = Path.GetFileNameWithoutExtension(assemblyName);
+            return assemblies.FirstOrDefault(a => string.Equals(
+                Path.GetFileNameWithoutExtension(a), wanted, StringComparison.OrdinalIgnoreCase));
+        }
+
+        return assemblies.FirstOrDefault(a => string.Equals(
+                   Path.GetFileNameWithoutExtension(a), packageId, StringComparison.OrdinalIgnoreCase))
+               ?? assemblies.FirstOrDefault();
     }
 
     private void DisplayAssembliesTree(List<string> assemblies, string extractPath)

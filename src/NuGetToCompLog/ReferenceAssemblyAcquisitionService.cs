@@ -259,8 +259,22 @@ public class ReferenceAssemblyAcquisitionService
             if (exactPath != null)
             {
                 acquiredReferences[fileName] = exactPath;
-                withMvid++;
-                mvidMatched++;
+                // The sibling probe falls back to the implementation assembly when no MVID
+                // matches, so what came back is not necessarily the original build - judge the
+                // chosen file, not the fact that a probe returned something, or the summary
+                // below claims every reference was verified when one was substituted.
+                if (reference.Mvid != Guid.Empty)
+                {
+                    withMvid++;
+                    if (TryReadMvid(exactPath) == reference.Mvid)
+                    {
+                        mvidMatched++;
+                    }
+                    else
+                    {
+                        mvidMismatched.Add(fileName);
+                    }
+                }
             }
             else
             {
