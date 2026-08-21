@@ -9,11 +9,34 @@ using NuGetToCompLog.Domain;
 using NuGetToCompLog.Infrastructure.FileSystem;
 using NuGetToCompLog.Services.Pdb;
 using Xunit;
+using DecompilerLanguageVersion = ICSharpCode.Decompiler.CSharp.LanguageVersion;
 
 namespace NuGetToCompLog.Tests;
 
 public class SourceFileDecompilerServiceTests
 {
+    /// <summary>
+    /// The decompiler must be capped at the /langversion the original compiled with, or it
+    /// emits constructs the rebuild rejects (CS8936). The mapping resolves the enum by name
+    /// rather than an exhaustive list, so a C# version newer than this code still caps
+    /// correctly once the decompiler knows it - "13" used to fall through to Latest.
+    /// </summary>
+    [Theory]
+    [InlineData("ISO-1", DecompilerLanguageVersion.CSharp1)]
+    [InlineData("5", DecompilerLanguageVersion.CSharp5)]
+    [InlineData("7", DecompilerLanguageVersion.CSharp7)]
+    [InlineData("7.2", DecompilerLanguageVersion.CSharp7_2)]
+    [InlineData("10.0", DecompilerLanguageVersion.CSharp10_0)]
+    [InlineData("13", DecompilerLanguageVersion.CSharp13_0)]
+    [InlineData("13.0", DecompilerLanguageVersion.CSharp13_0)]
+    [InlineData("14.0", DecompilerLanguageVersion.CSharp14_0)]
+    [InlineData("99.0", DecompilerLanguageVersion.Latest)]
+    [InlineData("preview", DecompilerLanguageVersion.Latest)]
+    public void LanguageVersionMapsByNameSoNewVersionsStayCapped(string recorded, DecompilerLanguageVersion expected)
+    {
+        Assert.Equal(expected, SourceFileDecompilerService.ParseLanguageVersion(recorded));
+    }
+
     /// <summary>
     /// The decompiler's whole job is the file split: it used to write the entire decompiled
     /// module into every missing document, so each type was defined once per file and the

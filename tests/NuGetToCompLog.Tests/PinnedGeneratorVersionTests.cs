@@ -101,6 +101,36 @@ public class PinnedGeneratorVersionTests
     }
 
     [Fact]
+    public void CandidateBuildFilesWalkFromTheProjectDirectoryToTheRepoRoot()
+    {
+        var files = SourceGeneratorAcquisitionService.DeriveCandidateBuildFiles(
+            ["/_/src/Foo/obj/Release/net8.0/PolySharp/Type/X.g.cs"], "/_/", "/_/");
+
+        Assert.Equal(
+        [
+            "src/Foo/Foo.csproj",
+            "src/Foo/Directory.Build.props", "src/Foo/Directory.Packages.props",
+            "src/Directory.Build.props", "src/Directory.Packages.props",
+            "Directory.Build.props", "Directory.Packages.props",
+        ], files);
+    }
+
+    /// <summary>
+    /// A project at the repo root writes its documents straight into obj/, so there is no
+    /// directory stretch to read a csproj name from - but the root props files are still
+    /// worth probing. This used to throw (a backwards range), which a blanket catch turned
+    /// into "no pinned version" for every root-level project.
+    /// </summary>
+    [Fact]
+    public void AProjectAtTheRepoRootStillProbesTheRootPropsFiles()
+    {
+        var files = SourceGeneratorAcquisitionService.DeriveCandidateBuildFiles(
+            ["/_/obj/Release/net8.0/PolySharp/Type/X.g.cs"], "/_/", "/_/");
+
+        Assert.Equal(["Directory.Build.props", "Directory.Packages.props"], files);
+    }
+
+    [Fact]
     public void IgnoresOtherPackagesAndUnparseableFiles()
     {
         Assert.Null(SourceGeneratorAcquisitionService.TryReadPinnedVersion(

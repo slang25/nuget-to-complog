@@ -177,25 +177,37 @@ public class SourceFileDecompilerService
         return LanguageVersion.Latest;
     }
 
-    private static LanguageVersion ParseLanguageVersion(string value) => value switch
+    /// <summary>
+    /// Maps a Roslyn language-version display string ("7.3", "13.0", "ISO-1") onto the
+    /// decompiler's enum by name, so a C# version this code was never taught about still
+    /// resolves once the decompiler knows it - an exhaustive switch would quietly send new
+    /// versions to Latest, un-capping the decompiler for exactly the builds most likely to
+    /// hit it. A version the decompiler genuinely does not know yet also falls back to
+    /// Latest, the closest cap it has.
+    /// </summary>
+    public static LanguageVersion ParseLanguageVersion(string value)
     {
-        "1" or "1.0" or "ISO-1" => LanguageVersion.CSharp1,
-        "2" or "2.0" or "ISO-2" => LanguageVersion.CSharp2,
-        "3" or "3.0" => LanguageVersion.CSharp3,
-        "4" or "4.0" => LanguageVersion.CSharp4,
-        "5" or "5.0" => LanguageVersion.CSharp5,
-        "6" or "6.0" => LanguageVersion.CSharp6,
-        "7" or "7.0" => LanguageVersion.CSharp7,
-        "7.1" => LanguageVersion.CSharp7_1,
-        "7.2" => LanguageVersion.CSharp7_2,
-        "7.3" => LanguageVersion.CSharp7_3,
-        "8" or "8.0" => LanguageVersion.CSharp8_0,
-        "9" or "9.0" => LanguageVersion.CSharp9_0,
-        "10" or "10.0" => LanguageVersion.CSharp10_0,
-        "11" or "11.0" => LanguageVersion.CSharp11_0,
-        "12" or "12.0" => LanguageVersion.CSharp12_0,
-        _ => LanguageVersion.Latest,
-    };
+        if (value.Equals("ISO-1", StringComparison.OrdinalIgnoreCase))
+        {
+            return LanguageVersion.CSharp1;
+        }
+        if (value.Equals("ISO-2", StringComparison.OrdinalIgnoreCase))
+        {
+            return LanguageVersion.CSharp2;
+        }
+
+        if (!Version.TryParse(value.Contains('.') ? value : value + ".0", out var version))
+        {
+            return LanguageVersion.Latest;
+        }
+
+        // The enum names mirror Roslyn's: CSharp7 for 7.0 and below, CSharp7_1 and
+        // CSharp8_0 style from 7.1 upward.
+        var name = version is { Major: <= 7, Minor: 0 }
+            ? $"CSharp{version.Major}"
+            : $"CSharp{version.Major}_{version.Minor}";
+        return Enum.TryParse<LanguageVersion>(name, out var parsed) ? parsed : LanguageVersion.Latest;
+    }
 
     /// <summary>
     /// Assigns every top-level type to the single document that owns it, using the PDB's

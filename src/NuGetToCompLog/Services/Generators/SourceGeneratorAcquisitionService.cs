@@ -338,34 +338,8 @@ public static class SourceGeneratorAcquisitionService
                 return null;
             }
 
-            // Project directory relative to the repo root, from a non-generated document's path
-            // (the pathmap root may sit above the project, e.g. "/_/src/").
-            var projectDir = manifest.Documents
-                .Select(d => d.DocumentPath.Replace('\\', '/'))
-                .Where(p => p.StartsWith(manifest.PathMapRoot, StringComparison.OrdinalIgnoreCase) && p.Contains("/obj/"))
-                .Select(p => p[keyPrefix.Length..p.IndexOf("/obj/", StringComparison.OrdinalIgnoreCase)])
-                .FirstOrDefault();
-
-            var candidateFiles = new List<string>();
-            if (projectDir != null)
-            {
-                candidateFiles.Add($"{projectDir}/{projectDir.Split('/')[^1]}.csproj");
-                for (var dir = projectDir; ; dir = dir[..Math.Max(dir.LastIndexOf('/'), 0)])
-                {
-                    var prefix = dir.Length > 0 ? dir + "/" : "";
-                    candidateFiles.Add($"{prefix}Directory.Build.props");
-                    candidateFiles.Add($"{prefix}Directory.Packages.props");
-                    if (dir.Length == 0 || !dir.Contains('/'))
-                    {
-                        if (dir.Length > 0)
-                        {
-                            candidateFiles.Add("Directory.Build.props");
-                            candidateFiles.Add("Directory.Packages.props");
-                        }
-                        break;
-                    }
-                }
-            }
+            var candidateFiles = DeriveCandidateBuildFiles(
+                manifest.Documents.Select(d => d.DocumentPath), manifest.PathMapRoot, keyPrefix);
 
             // The generator package is usually named like the assembly (or a prefix of it).
             var packageIds = EnumeratePackageIdCandidates(generatorAssembly)
@@ -395,6 +369,55 @@ public static class SourceGeneratorAcquisitionService
         {
         }
         return null;
+    }
+
+    /// <summary>
+    /// The repo-relative build files worth probing for a pinned version, most specific first:
+    /// the project's own csproj (named after its directory), then Directory.Build.props /
+    /// Directory.Packages.props at every level up to the repo root. The project directory is
+    /// the stretch of a document path between the Source Link key prefix and its obj/ segment
+    /// (the pathmap root may sit above the project, e.g. "/_/src/"). A project sitting at the
+    /// repo root has an empty stretch - its documents go straight into obj/ - so its csproj
+    /// name is not recoverable from the paths and only the root-level props files are probed.
+    /// </summary>
+    public static List<string> DeriveCandidateBuildFiles(
+        IEnumerable<string> documentPaths, string pathMapRoot, string keyPrefix)
+    {
+        var projectDir = documentPaths
+            .Select(d => d.Replace('\\', '/'))
+            .Where(p => p.StartsWith(pathMapRoot, StringComparison.OrdinalIgnoreCase) && p.Contains("/obj/"))
+            .Select(p => p[keyPrefix.Length..])
+            .Select(rest => rest.StartsWith("obj/", StringComparison.OrdinalIgnoreCase)
+                ? ""
+                : rest[..Math.Max(rest.IndexOf("/obj/", StringComparison.OrdinalIgnoreCase), 0)])
+            .FirstOrDefault();
+
+        var candidateFiles = new List<string>();
+        if (projectDir == null)
+        {
+            return candidateFiles;
+        }
+
+        if (projectDir.Length > 0)
+        {
+            candidateFiles.Add($"{projectDir}/{projectDir.Split('/')[^1]}.csproj");
+        }
+        for (var dir = projectDir; ; dir = dir[..Math.Max(dir.LastIndexOf('/'), 0)])
+        {
+            var prefix = dir.Length > 0 ? dir + "/" : "";
+            candidateFiles.Add($"{prefix}Directory.Build.props");
+            candidateFiles.Add($"{prefix}Directory.Packages.props");
+            if (dir.Length == 0 || !dir.Contains('/'))
+            {
+                if (dir.Length > 0)
+                {
+                    candidateFiles.Add("Directory.Build.props");
+                    candidateFiles.Add("Directory.Packages.props");
+                }
+                break;
+            }
+        }
+        return candidateFiles;
     }
 
     /// <summary>
