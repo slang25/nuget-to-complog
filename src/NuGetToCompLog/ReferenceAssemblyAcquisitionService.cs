@@ -181,6 +181,32 @@ public class ReferenceAssemblyAcquisitionService
             }
         }
 
+        // References recorded in the PDB that resolved nowhere: compile-time-only package
+        // references (PrivateAssets="all", e.g. System.IO.Hashing) appear in neither the
+        // targeting pack nor the nuspec dependency list. Probe the package named after the
+        // assembly itself for an MVID match rather than silently dropping the reference.
+        foreach (var reference in references.Where(r => !acquiredReferences.ContainsKey(Path.GetFileName(r.FileName))))
+        {
+            var fileName = Path.GetFileName(reference.FileName);
+            string? exactPath = null;
+            if (reference.Mvid != Guid.Empty && !string.IsNullOrEmpty(targetFramework))
+            {
+                exactPath = await TryFindExactPackageAssemblyAsync(
+                    Path.GetFileNameWithoutExtension(fileName), fileName, reference.Mvid, targetFramework);
+            }
+
+            if (exactPath != null)
+            {
+                acquiredReferences[fileName] = exactPath;
+                withMvid++;
+                mvidMatched++;
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"  [yellow]⚠[/] Recorded reference {fileName} could not be acquired from any source");
+            }
+        }
+
         if (withMvid > 0)
         {
             if (mvidMismatched.Count == 0)

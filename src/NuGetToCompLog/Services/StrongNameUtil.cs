@@ -131,6 +131,13 @@ public static class StrongNameUtil
         using var httpClient = new HttpClient();
         httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("nuget-to-complog");
         httpClient.Timeout = TimeSpan.FromSeconds(30);
+        // Unauthenticated api.github.com allows only 60 requests/hour; honor the standard
+        // token variables so repeated runs don't silently degrade to /publicsign.
+        var token = Environment.GetEnvironmentVariable("GITHUB_TOKEN") ?? Environment.GetEnvironmentVariable("GH_TOKEN");
+        if (!string.IsNullOrEmpty(token))
+        {
+            httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        }
 
         try
         {
@@ -138,6 +145,9 @@ public static class StrongNameUtil
             using var treeResponse = await httpClient.GetAsync(treeUrl, cancellationToken);
             if (!treeResponse.IsSuccessStatusCode)
             {
+                Spectre.Console.AnsiConsole.MarkupLine(
+                    $"  [yellow]⚠[/] GitHub tree listing failed ({(int)treeResponse.StatusCode}) while probing for a signing key" +
+                    (string.IsNullOrEmpty(token) ? " - set GITHUB_TOKEN to avoid the unauthenticated rate limit" : ""));
                 return null;
             }
 

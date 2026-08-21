@@ -151,7 +151,18 @@ public class CompLogFileCreator
             var strongNameArgs = await PrepareStrongNameArgsAsync(assemblyPath, workingDirectory, diagnostics);
             CopyOriginalPdbNextToSources(assemblyPath, workingDirectory, debugConfig, manifest);
 
-            var args = BuildCompilerArguments(argsDict, assemblyPath, workingDirectory, acquiredReferences, debugConfig, manifest, strongNameArgs);
+            // Generator-produced documents can only be reproduced exactly by running the actual
+            // generator (checksum algorithm and embedded compression differ for plain files);
+            // swap them for /analyzer references when the generator provably regenerates them.
+            Services.Generators.GeneratorPlan? generatorPlan = null;
+            if (manifest != null)
+            {
+                generatorPlan = await Services.Generators.SourceGeneratorAcquisitionService.TryPlanAsync(
+                    workingDirectory, manifest, argsDict, acquiredReferences,
+                    Path.GetFileNameWithoutExtension(assemblyPath));
+            }
+
+            var args = BuildCompilerArguments(argsDict, assemblyPath, workingDirectory, acquiredReferences, debugConfig, manifest, strongNameArgs, generatorPlan);
 
             var projectDir = Path.Combine(workingDirectory, "sources");
             var projectFilePath = Path.Combine(projectDir, $"{packageId}.csproj");
@@ -364,7 +375,8 @@ public class CompLogFileCreator
         Dictionary<string, string> acquiredReferences,
         DebugConfiguration debugConfig,
         SourceManifest? manifest,
-        List<string> strongNameArgs)
+        List<string> strongNameArgs,
+        Services.Generators.GeneratorPlan? generatorPlan = null)
     {
         var args = new List<string>();
         
@@ -415,13 +427,10 @@ public class CompLogFileCreator
         // /filealign:
         args.Add("/filealign:512");
         
-        // /optimize
+        // /optimize (and /debug+ when the original recorded DebugPlusMode)
         if (argsDict.TryGetValue("optimization", out var optimization))
         {
-            var optimizationValue = optimization.Equals("release", StringComparison.OrdinalIgnoreCase) ||
-                                   optimization.Equals("true", StringComparison.OrdinalIgnoreCase) ||
-                                   optimization.Equals("1", StringComparison.OrdinalIgnoreCase);
-            args.Add($"/optimize{(optimizationValue ? "+" : "-")}");
+            args.AddRange(OptimizationOptions.ToCompilerFlags(optimization));
         }
         
         // Pathmap (must come before /target to match ordering).
@@ -435,6 +444,15 @@ public class CompLogFileCreator
             {
                 args.Add($"/pathmap:output/={pdbDir}/");
             }
+        }
+        // Documents outside the project root (e.g. NuGet contentFiles recorded under the "/_1/"
+        // pathmap root) live under src/_external/<original-root>/...; map them back to their
+        // absolute originals first - csc applies the first matching pathmap entry, so this must
+        // precede the general src/ mapping.
+        if (manifest != null && manifest.Documents.Any(d =>
+                d.LocalPath.StartsWith("_external/", StringComparison.Ordinal)))
+        {
+            args.Add("/pathmap:src/_external/=/");
         }
         if (manifest?.PathMapRoot != null)
         {
@@ -503,8 +521,17 @@ public class CompLogFileCreator
                 "runtime-version" => "runtimemetadataversion",
                 _ => kvp.Key
             };
-            
-            args.Add($"/{argName}:{kvp.Value}");
+
+            // Boolean options (e.g. "unsafe:True") use csc's +/- flag form; "/unsafe:True"
+            // is rejected with CS2007.
+            if (bool.TryParse(kvp.Value, out var flag))
+            {
+                args.Add($"/{argName}{(flag ? "+" : "-")}");
+            }
+            else
+            {
+                args.Add($"/{argName}:{kvp.Value}");
+            }
         }
         
         // Strong-name signing arguments (paths relative to the sources/project directory)
@@ -521,12 +548,42 @@ public class CompLogFileCreator
             args.Add("/sourcelink:source-link.json");
         }
 
+        // Attach validated source generators; csc re-generates (and auto-embeds) their
+        // documents itself, so those are excluded from the source and /embed lists below.
+        // /generatedfilesout anchors the generated trees at the original obj/ path so the
+        // src/ pathmap reproduces the original document paths.
+        if (generatorPlan != null)
+        {
+            foreach (var analyzer in generatorPlan.AnalyzerFileNames)
+            {
+                // Absolute: CompilerLogBuilder reads analyzer bytes at creation time and does
+                // not resolve relative analyzer paths against the project directory.
+                args.Add($"/analyzer:{Path.Combine(workingDirectory, "sources", "analyzers", analyzer)}");
+            }
+            args.Add($"/generatedfilesout:{generatorPlan.GeneratedFilesBaseDir}");
+
+            if (generatorPlan.GlobalOptions.Count > 0)
+            {
+                // Carry the inferred analyzer options (validated above) into the rebuild.
+                var configLines = new List<string> { "is_global = true" };
+                configLines.AddRange(generatorPlan.GlobalOptions
+                    .OrderBy(kvp => kvp.Key, StringComparer.Ordinal)
+                    .Select(kvp => $"{kvp.Key} = {kvp.Value}"));
+                File.WriteAllLines(Path.Combine(sourcesDir, "generators.globalconfig"), configLines);
+                args.Add("/analyzerconfig:generators.globalconfig");
+            }
+        }
+
         // /embed: re-embeds the sources the original PDB embedded (typically the compiler-
         // generated files under obj/)
         if (manifest != null)
         {
             foreach (var doc in manifest.Documents.Where(d => d.IsEmbedded))
             {
+                if (generatorPlan?.GeneratedLocalPaths.Contains(doc.LocalPath) == true)
+                {
+                    continue;
+                }
                 // /embed takes a comma-separated path list, so paths containing commas
                 // (e.g. ".NETCoreApp,Version=v9.0.AssemblyAttributes.cs") must be quoted.
                 var path = doc.LocalPath.Contains(',') || doc.LocalPath.Contains(' ')
@@ -543,6 +600,10 @@ public class CompLogFileCreator
         {
             foreach (var doc in manifest.Documents)
             {
+                if (generatorPlan?.GeneratedLocalPaths.Contains(doc.LocalPath) == true)
+                {
+                    continue;
+                }
                 if (!File.Exists(Path.Combine(sourcesDir, doc.LocalPath)))
                 {
                     AnsiConsole.MarkupLine($"  [yellow]⚠[/] Source file missing, skipping: [dim]{doc.LocalPath}[/]");

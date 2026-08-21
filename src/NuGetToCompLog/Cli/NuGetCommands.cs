@@ -68,15 +68,17 @@ public class NuGetCommands
     /// </summary>
     /// <param name="packageId">The NuGet package identifier (e.g., Serilog)</param>
     /// <param name="version">The package version. If not specified, uses latest stable version.</param>
+    /// <param name="fetchCompiler">Download the exact compiler (Microsoft.Net.Compilers.Toolset) from nuget.org or the dnceng dotnet-tools feed when it is not installed locally.</param>
     [Command("verify")]
     public async Task Verify(
         [Argument] string packageId,
-        [Argument] string? version = null)
+        [Argument] string? version = null,
+        bool fetchCompiler = false)
     {
         _console.SetIndeterminateProgress();
         try
         {
-            Environment.ExitCode = await _verifyHandler.HandleAsync(packageId, version);
+            Environment.ExitCode = await _verifyHandler.HandleAsync(packageId, version, fetchCompiler);
         }
         finally
         {

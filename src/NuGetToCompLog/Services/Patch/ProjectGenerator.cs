@@ -193,10 +193,7 @@ public class ProjectGenerator
 
                 if (argsDict.TryGetValue("optimization", out var optimization))
                 {
-                    var optimizationValue = optimization.Equals("release", StringComparison.OrdinalIgnoreCase) ||
-                                           optimization.Equals("true", StringComparison.OrdinalIgnoreCase) ||
-                                           optimization.Equals("1", StringComparison.OrdinalIgnoreCase);
-                    lines.Add($"/optimize{(optimizationValue ? "+" : "-")}");
+                    lines.AddRange(OptimizationOptions.ToCompilerFlags(optimization));
                 }
 
                 if (debugConfig.HasReproducible)

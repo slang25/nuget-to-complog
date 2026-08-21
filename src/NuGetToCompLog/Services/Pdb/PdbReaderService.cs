@@ -199,29 +199,38 @@ public class PdbReaderService : IPdbReader
 
         try
         {
-            var assembly = System.Reflection.Assembly.LoadFrom(assemblyPath);
-            var resourceNames = assembly.GetManifestResourceNames();
-
-            foreach (var resourceName in resourceNames)
+            // Read the manifest resources from metadata rather than Assembly.LoadFrom: loading
+            // a package's assembly into our own runtime can fail (or execute code) and a silent
+            // failure here means the rebuild ships without its resources.
+            using var stream = File.OpenRead(assemblyPath);
+            using var peReader = new PEReader(stream);
+            var metadataReader = peReader.GetMetadataReader();
+            var resourcesDirectory = peReader.PEHeaders.CorHeader?.ResourcesDirectory;
+            if (resourcesDirectory is not { RelativeVirtualAddress: > 0 } directory)
             {
-                using var stream = assembly.GetManifestResourceStream(resourceName);
-                if (stream != null)
+                return resources;
+            }
+
+            foreach (var handle in metadataReader.ManifestResources)
+            {
+                var resource = metadataReader.GetManifestResource(handle);
+                if (!resource.Implementation.IsNil)
                 {
-                    using var memoryStream = new MemoryStream();
-                    stream.CopyTo(memoryStream);
-                    var content = memoryStream.ToArray();
-                    
-                    resources.Add(new EmbeddedResourceInfo(
-                        resourceName,
-                        content,
-                        content.Length));
+                    continue; // lives in another file/assembly, not embedded here
                 }
+
+                var name = metadataReader.GetString(resource.Name);
+                var data = peReader.GetSectionData(directory.RelativeVirtualAddress + (int)resource.Offset);
+                var blobReader = data.GetReader();
+                var length = blobReader.ReadInt32();
+                var content = blobReader.ReadBytes(length);
+
+                resources.Add(new EmbeddedResourceInfo(name, content, content.Length));
             }
         }
         catch (Exception)
         {
-            // If we can't load the assembly or extract resources, just return empty list
-            // This can happen with invalid assemblies or platform-specific assemblies
+            // Unreadable/invalid assembly: return what we have.
         }
 
         return resources;
