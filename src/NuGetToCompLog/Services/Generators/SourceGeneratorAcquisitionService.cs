@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Text;
@@ -40,6 +41,20 @@ public record GeneratorPlan(
 /// </summary>
 public static class SourceGeneratorAcquisitionService
 {
+    /// <summary>
+    /// A manifest document the generator is expected to produce, with the checksum the PDB
+    /// recorded for it.
+    /// </summary>
+    private record GeneratedDocument(
+        string LocalPath,
+        string TypeName,
+        string BaseDir,
+        string? Hash,
+        string? HashAlgorithm);
+
+    /// <summary>What a candidate generator has to reproduce for one document.</summary>
+    private record ExpectedDocument(string Content, string? Hash, string? HashAlgorithm);
+
     // [{Project}/...]obj/{Config}/{Tfm}/{GeneratorAssembly}/{GeneratorType}/{file}.cs
     // (the local path may keep leading project segments when the pathmap root sits above the
     // project directory, e.g. "/_/src/" for FluentValidation)
@@ -59,7 +74,7 @@ public static class SourceGeneratorAcquisitionService
         string assemblyName)
     {
         var sourcesDir = Path.Combine(workingDirectory, "sources");
-        var byAssembly = new Dictionary<string, List<(string LocalPath, string TypeName, string BaseDir)>>();
+        var byAssembly = new Dictionary<string, List<GeneratedDocument>>();
         foreach (var doc in manifest.Documents)
         {
             var match = GeneratedDocPattern.Match(doc.LocalPath.Replace('\\', '/'));
@@ -71,7 +86,9 @@ public static class SourceGeneratorAcquisitionService
             {
                 byAssembly[match.Groups["asm"].Value] = list = [];
             }
-            list.Add((doc.LocalPath, match.Groups["type"].Value, match.Groups["base"].Value));
+            list.Add(new GeneratedDocument(
+                doc.LocalPath, match.Groups["type"].Value, match.Groups["base"].Value,
+                doc.Hash, doc.HashAlgorithm));
         }
 
         if (byAssembly.Count == 0)
@@ -136,19 +153,20 @@ public static class SourceGeneratorAcquisitionService
 
         foreach (var (generatorAssembly, docs) in byAssembly)
         {
-            var expected = new Dictionary<(string Type, string File), string>();
+            var expected = new Dictionary<(string Type, string File), ExpectedDocument>();
             string? generatedCodeVersion = null;
             var missing = false;
-            foreach (var (localPath, typeName, _) in docs)
+            foreach (var doc in docs)
             {
-                var fullPath = Path.Combine(sourcesDir, localPath);
+                var fullPath = Path.Combine(sourcesDir, doc.LocalPath);
                 if (!File.Exists(fullPath))
                 {
                     missing = true;
                     break;
                 }
                 var content = await File.ReadAllTextAsync(fullPath);
-                expected[(typeName, Path.GetFileName(localPath))] = content;
+                expected[(doc.TypeName, Path.GetFileName(doc.LocalPath))] =
+                    new ExpectedDocument(content, doc.Hash, doc.HashAlgorithm);
                 generatedCodeVersion ??= GeneratedCodeVersionPattern.Match(content) is { Success: true } m
                     ? m.Groups["ver"].Value
                     : null;
@@ -210,9 +228,9 @@ public static class SourceGeneratorAcquisitionService
                     {
                         plan.GlobalOptions[key] = value;
                     }
-                    foreach (var (localPath, _, _) in docs)
+                    foreach (var doc in docs)
                     {
-                        plan.GeneratedLocalPaths.Add(localPath);
+                        plan.GeneratedLocalPaths.Add(doc.LocalPath);
                     }
                     AnsiConsole.MarkupLine($"  [green]✓[/] {generatorAssembly} regenerates all {docs.Count} document(s) byte-for-byte - attaching as analyzer");
                     attached = true;
@@ -302,11 +320,8 @@ public static class SourceGeneratorAcquisitionService
             }
 
             // The generator package is usually named like the assembly (or a prefix of it).
-            var idPattern = string.Join("|",
-                EnumeratePackageIdCandidates(generatorAssembly).Select(Regex.Escape));
-            var referencePattern = new Regex(
-                $@"PackageReference\s[^>]*Include\s*=\s*""(?:{idPattern})""[^>]*Version\s*=\s*""([^""]+)""",
-                RegexOptions.IgnoreCase);
+            var packageIds = EnumeratePackageIdCandidates(generatorAssembly)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             foreach (var file in candidateFiles.Distinct())
             {
@@ -318,9 +333,9 @@ public static class SourceGeneratorAcquisitionService
                         continue;
                     }
                     var content = await response.Content.ReadAsStringAsync();
-                    if (referencePattern.Match(content) is { Success: true } match)
+                    if (TryReadPinnedVersion(content, packageIds) is { } version)
                     {
-                        return match.Groups[1].Value;
+                        return version;
                     }
                 }
                 catch (HttpRequestException)
@@ -332,6 +347,86 @@ public static class SourceGeneratorAcquisitionService
         {
         }
         return null;
+    }
+
+    /// <summary>
+    /// The version an MSBuild file pins one of the candidate package ids at. Both spellings
+    /// count: a <c>PackageReference</c> carrying its own <c>Version</c>, and the
+    /// <c>PackageVersion</c> a Directory.Packages.props declares under central package
+    /// management - where the PackageReference itself has no version at all. The version may
+    /// also sit in a child element, and XML attribute order is meaningless, so this parses the
+    /// document rather than pattern-matching the text. Property references are resolved against
+    /// the same document, which is where a Directory.Packages.props usually declares them.
+    /// </summary>
+    public static string? TryReadPinnedVersion(string projectXml, IReadOnlySet<string> packageIds)
+    {
+        XDocument document;
+        try
+        {
+            document = XDocument.Parse(projectXml);
+        }
+        catch (System.Xml.XmlException)
+        {
+            return null;
+        }
+
+        var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var property in document.Descendants()
+                     .Where(e => e.Parent != null && Named(e.Parent, "PropertyGroup")))
+        {
+            properties[property.Name.LocalName] = property.Value.Trim();
+        }
+
+        foreach (var element in document.Descendants())
+        {
+            if (!Named(element, "PackageReference") &&
+                !Named(element, "PackageVersion") &&
+                !Named(element, "GlobalPackageReference"))
+            {
+                continue;
+            }
+
+            var id = AttributeValue(element, "Include") ?? AttributeValue(element, "Update");
+            if (id == null || !packageIds.Contains(id.Trim()))
+            {
+                continue;
+            }
+
+            var version = AttributeValue(element, "VersionOverride")
+                          ?? AttributeValue(element, "Version")
+                          ?? ChildValue(element, "Version");
+            version = Expand(version, properties);
+            if (!string.IsNullOrWhiteSpace(version))
+            {
+                return version.Trim();
+            }
+        }
+
+        return null;
+
+        static bool Named(XElement element, string name) =>
+            string.Equals(element.Name.LocalName, name, StringComparison.OrdinalIgnoreCase);
+
+        static string? AttributeValue(XElement element, string name) => element.Attributes()
+            .FirstOrDefault(a => string.Equals(a.Name.LocalName, name, StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+
+        static string? ChildValue(XElement element, string name) => element.Elements()
+            .FirstOrDefault(e => string.Equals(e.Name.LocalName, name, StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+
+        // A version that still references a property this document doesn't declare is no use
+        // as a version number, so it is treated as "not pinned here" and the next file is tried.
+        static string? Expand(string? value, Dictionary<string, string> properties)
+        {
+            if (value == null || !value.Contains("$("))
+            {
+                return value;
+            }
+            var expanded = Regex.Replace(value, @"\$\((?<name>[^()]+)\)",
+                m => properties.GetValueOrDefault(m.Groups["name"].Value.Trim(), ""));
+            return expanded.Contains("$(") || string.IsNullOrWhiteSpace(expanded) ? null : expanded;
+        }
     }
 
     private static IEnumerable<string> EnumeratePackageIdCandidates(string generatorAssembly)
@@ -355,7 +450,7 @@ public static class SourceGeneratorAcquisitionService
     /// </summary>
     private static Dictionary<string, string>? InferGeneratorOptions(
         string generatorAssembly,
-        List<(string LocalPath, string TypeName, string BaseDir)> docs)
+        List<GeneratedDocument> docs)
     {
         // PolySharp generates every applicable polyfill by default; a curated original output
         // means the build set PolySharpIncludeGeneratedTypes. The generated file names are
@@ -642,13 +737,19 @@ public static class SourceGeneratorAcquisitionService
     /// Runs every generator in the assembly against the validation compilation and requires the
     /// produced sources to be exactly the expected (type, file) → content set - no drift, no
     /// extras (an extra hint name would become an extra PDB document).
+    ///
+    /// Matching text is not enough. csc embeds the generated SourceText itself and records its
+    /// checksum in the PDB Documents table, so a candidate producing the same characters with a
+    /// different encoding (a BOM) or a different checksum algorithm yields a different PDB - and
+    /// through PdbChecksum a different assembly. Where the manifest kept the original document
+    /// hash, the candidate has to reproduce that too.
     /// </summary>
     private static (bool Ok, string Why) ValidateGenerator(
         string dllPath,
         Compilation compilation,
         Dictionary<string, string> argsDict,
         Dictionary<string, string> globalOptions,
-        Dictionary<(string Type, string File), string> expected)
+        Dictionary<(string Type, string File), ExpectedDocument> expected)
     {
         try
         {
@@ -704,13 +805,13 @@ public static class SourceGeneratorAcquisitionService
                     optionsProvider: new InMemoryAnalyzerConfigOptionsProvider(globalOptions));
                 var runResult = driver.RunGenerators(compilation).GetRunResult();
 
-                var produced = new Dictionary<(string, string), string>();
+                var produced = new Dictionary<(string, string), SourceText>();
                 foreach (var result in runResult.Results)
                 {
                     var typeName = result.Generator.GetGeneratorType().FullName!;
                     foreach (var source in result.GeneratedSources)
                     {
-                        produced[(typeName, Path.GetFileName(source.HintName))] = source.SourceText.ToString();
+                        produced[(typeName, Path.GetFileName(source.HintName))] = source.SourceText;
                     }
                 }
 
@@ -721,18 +822,22 @@ public static class SourceGeneratorAcquisitionService
                     return (false, $"produced {produced.Count} source(s), original had {expected.Count} " +
                                    $"(extra: {string.Join(", ", extra)})");
                 }
-                foreach (var ((type, file), content) in expected)
+                foreach (var ((type, file), document) in expected)
                 {
                     if (!produced.TryGetValue((type, file), out var actual))
                     {
                         return (false, $"did not produce {file}");
                     }
-                    if (actual != content)
+                    if (actual.ToString() != document.Content)
                     {
                         // Leave the regenerated text next to the candidate dll for diffing.
                         var dumpPath = Path.Combine(directory, file + ".regenerated");
-                        File.WriteAllText(dumpPath, actual);
+                        File.WriteAllText(dumpPath, actual.ToString());
                         return (false, $"content differs for {file}");
+                    }
+                    if (ChecksumMismatch(actual, document) is { } why)
+                    {
+                        return (false, $"{why} for {file}");
                     }
                 }
                 return (true, "");
@@ -746,6 +851,38 @@ public static class SourceGeneratorAcquisitionService
         {
             return (false, ex.Message.Replace("[", "[[").Replace("]", "]]"));
         }
+    }
+
+    /// <summary>
+    /// Why the generated text cannot hash to the checksum the original build recorded, or null
+    /// when it does (or the manifest recorded no usable checksum to compare against).
+    ///
+    /// The comparison is over the SourceText's *encoded bytes* - which is what csc hashes and
+    /// embeds - so a candidate emitting the same characters through a different encoding (a BOM)
+    /// is rejected even though its text matched. The recorded algorithm is applied to those
+    /// bytes rather than compared against the candidate's own ChecksumAlgorithm: added-source
+    /// texts take their algorithm from whichever Roslyn runs the generator, so this harness's
+    /// choice says nothing about the one the rebuild compiler will make.
+    /// </summary>
+    private static string? ChecksumMismatch(SourceText produced, ExpectedDocument expected)
+    {
+        var algorithm = expected.HashAlgorithm?.ToLowerInvariant() switch
+        {
+            "sha1" => SourceHashAlgorithm.Sha1,
+            "sha256" => SourceHashAlgorithm.Sha256,
+            _ => (SourceHashAlgorithm?)null,
+        };
+        if (algorithm == null || string.IsNullOrEmpty(expected.Hash))
+        {
+            return null;
+        }
+
+        var asRecorded = SourceText.From(
+            produced.ToString(), produced.Encoding ?? System.Text.Encoding.UTF8, algorithm.Value);
+        var checksum = Convert.ToHexStringLower(asRecorded.GetChecksum().AsSpan());
+        return string.Equals(checksum, expected.Hash, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : $"{algorithm} checksum {checksum} differs from the recorded {expected.Hash}";
     }
 
     private sealed class InMemoryAnalyzerConfigOptionsProvider : Microsoft.CodeAnalysis.Diagnostics.AnalyzerConfigOptionsProvider

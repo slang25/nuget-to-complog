@@ -52,7 +52,7 @@ public class SourceFileDecompilerService
             using var peReader = new PEReader(peStream);
             var peMetadata = peReader.GetMetadataReader();
 
-            var typesByDocument = MapTypesToDocuments(
+            var (typesByDocument, splitTypes) = MapTypesToDocuments(
                 peMetadata, pdbMetadataReader, missingSourceFiles, allDocumentsMissing);
 
             // The decompiler emits whatever C# expresses the IL most directly, which is newer
@@ -112,6 +112,14 @@ public class SourceFileDecompilerService
                     _console.MarkupLine(
                         $"  [dim]{emptyCount} of {successCount} document(s) had no recoverable types " +
                         "(no debug info maps to them)[/]");
+                }
+                if (splitTypes.Count > 0)
+                {
+                    _console.MarkupLine(
+                        $"  [yellow]⚠[/] {splitTypes.Count} type(s) are declared partially in a document " +
+                        "we already have, so they were left unrecovered - the parts that lived in the " +
+                        $"missing document(s) will not compile: {string.Join(", ", splitTypes.Take(5))}" +
+                        (splitTypes.Count > 5 ? ", ..." : ""));
                 }
             }
 
@@ -195,17 +203,22 @@ public class SourceFileDecompilerService
     /// document holding most of them wins - emitting the type into each would redefine it.
     /// Types the PDB says belong to a document we already have are left out entirely, since
     /// that file will define them.
+    ///
+    /// Also returns the types that had to be skipped because they span a recovered document
+    /// and a missing one, so the caller can say so.
     /// </summary>
-    private static Dictionary<string, List<TypeDefinitionHandle>> MapTypesToDocuments(
-        MetadataReader peMetadata,
-        MetadataReader? pdbMetadata,
-        IReadOnlyList<SourceFileInfo> missingSourceFiles,
-        bool allDocumentsMissing)
+    private static (Dictionary<string, List<TypeDefinitionHandle>> ByDocument, List<string> SplitTypes)
+        MapTypesToDocuments(
+            MetadataReader peMetadata,
+            MetadataReader? pdbMetadata,
+            IReadOnlyList<SourceFileInfo> missingSourceFiles,
+            bool allDocumentsMissing)
     {
         var result = new Dictionary<string, List<TypeDefinitionHandle>>(StringComparer.OrdinalIgnoreCase);
+        var splitTypes = new List<string>();
         if (pdbMetadata == null)
         {
-            return result;
+            return (result, splitTypes);
         }
 
         var missing = missingSourceFiles.Select(f => f.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -263,6 +276,17 @@ public class SourceFileDecompilerService
             {
                 continue;
             }
+            // A partial type split across a recovered document and a missing one is already
+            // declared by the file we have. The decompiler only emits whole types, so writing
+            // it here would repeat every member the recovered part declares (CS0111) and
+            // redeclare the type without `partial` (CS0260) - the rebuild would not even
+            // parse. Leaving it out costs the members that lived in the missing file, which
+            // the caller reports.
+            if (perDocument.Keys.Any(document => !missing.Contains(document)))
+            {
+                splitTypes.Add(GetTypeName(peMetadata, type));
+                continue;
+            }
             if (!result.TryGetValue(owner, out var list))
             {
                 result[owner] = list = [];
@@ -273,29 +297,51 @@ public class SourceFileDecompilerService
         // Types with no debug info at all (interfaces, enums, delegates) can only be placed when
         // every document is missing. If any document was recovered, one of them most likely
         // declares the type already, and emitting it here would define it twice.
-        if (allDocumentsMissing && result.Count > 0)
+        if (allDocumentsMissing)
         {
-            var catchAll = result.OrderByDescending(kvp => kvp.Value.Count)
-                .ThenBy(kvp => kvp.Key, StringComparer.Ordinal)
-                .First().Key;
-            var placed = votes.Keys.ToHashSet();
-            foreach (var handle in peMetadata.TypeDefinitions)
+            // Normally the document that already owns the most types takes them. An assembly
+            // whose source declares no method bodies at all (enums, interfaces) has no method
+            // debug info, so nothing established an owner - fall back to a missing document,
+            // otherwise every file would be written as a placeholder comment.
+            var catchAll = result.Count > 0
+                ? result.OrderByDescending(kvp => kvp.Value.Count)
+                    .ThenBy(kvp => kvp.Key, StringComparer.Ordinal)
+                    .First().Key
+                : missingSourceFiles.Select(f => f.Path).OrderBy(p => p, StringComparer.Ordinal).FirstOrDefault();
+            if (catchAll != null)
             {
-                var type = peMetadata.GetTypeDefinition(handle);
-                if (type.IsNested || placed.Contains(handle))
+                if (!result.TryGetValue(catchAll, out var catchAllTypes))
                 {
-                    continue;
+                    result[catchAll] = catchAllTypes = [];
                 }
-                // <Module> carries no source-level declaration.
-                if (peMetadata.GetString(type.Name) == "<Module>")
+
+                var placed = votes.Keys.ToHashSet();
+                foreach (var handle in peMetadata.TypeDefinitions)
                 {
-                    continue;
+                    var type = peMetadata.GetTypeDefinition(handle);
+                    if (type.IsNested || placed.Contains(handle))
+                    {
+                        continue;
+                    }
+                    // <Module> carries no source-level declaration.
+                    if (peMetadata.GetString(type.Name) == "<Module>")
+                    {
+                        continue;
+                    }
+                    catchAllTypes.Add(handle);
                 }
-                result[catchAll].Add(handle);
             }
         }
 
-        return result;
+        return (result, splitTypes);
+    }
+
+    private static string GetTypeName(MetadataReader reader, TypeDefinitionHandle handle)
+    {
+        var type = reader.GetTypeDefinition(handle);
+        var name = reader.GetString(type.Name);
+        var ns = reader.GetString(type.Namespace);
+        return string.IsNullOrEmpty(ns) ? name : ns + "." + name;
     }
 
     private static TypeDefinitionHandle GetTopLevelType(MetadataReader reader, TypeDefinitionHandle handle)

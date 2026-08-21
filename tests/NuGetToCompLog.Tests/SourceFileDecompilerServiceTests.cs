@@ -96,6 +96,88 @@ public class SourceFileDecompilerServiceTests
         }
     }
 
+    /// <summary>
+    /// When a partial type spans a document we recovered and one we did not, the recovered file
+    /// already declares it. Decompiling the whole metadata type into the missing file would
+    /// repeat every member of the recovered part, so the type is left out entirely.
+    /// </summary>
+    [Fact]
+    public async Task PartialTypeSpanningARecoveredDocumentIsNotDecompiled()
+    {
+        var directory = Directory.CreateTempSubdirectory("decompile-split").FullName;
+        try
+        {
+            // Part2 holds most of the methods, so it wins the vote - and it is the missing one.
+            var (assemblyPath, pdbPath) = EmitTrees(directory, "SampleSplit",
+            [
+                ("/src/Part1.cs", "public partial class Split { public int A() { return 1; } }"),
+                ("/src/Part2.cs", "public partial class Split { public int B() { return 2; } public int C() { return 3; } }"),
+            ]);
+            using var pdbStream = File.OpenRead(pdbPath);
+            using var pdbProvider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
+
+            var output = Path.Combine(directory, "out");
+            var written = await new SourceFileDecompilerService(new FileSystemService(), new SilentConsole())
+                .DecompileMissingFilesAsync(
+                    assemblyPath,
+                    [new SourceFileInfo("/src/Part2.cs", null, false, null, LocalPath: "Part2.cs")],
+                    pdbProvider.GetMetadataReader(),
+                    output,
+                    allDocumentsMissing: false);
+
+            Assert.Equal(1, written);
+            var part2 = await File.ReadAllTextAsync(Path.Combine(output, "Part2.cs"));
+            Assert.DoesNotContain("class Split", part2);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// An assembly whose source declares no method bodies (enums, interfaces) has no method
+    /// debug info, so no document can claim ownership by vote. Every document is still missing,
+    /// so the types have to land somewhere rather than every file being a placeholder comment.
+    /// </summary>
+    [Fact]
+    public async Task TypesWithNoMethodDebugInfoStillLandInADocument()
+    {
+        var directory = Directory.CreateTempSubdirectory("decompile-nomethods").FullName;
+        try
+        {
+            var (assemblyPath, pdbPath) = EmitTrees(directory, "SampleDeclarative",
+            [
+                ("/src/Colors.cs", "public enum Colors { Red, Green }"),
+                ("/src/IThing.cs", "public interface IThing { int Value { get; } }"),
+            ]);
+            using var pdbStream = File.OpenRead(pdbPath);
+            using var pdbProvider = MetadataReaderProvider.FromPortablePdbStream(pdbStream);
+
+            var output = Path.Combine(directory, "out");
+            var written = await new SourceFileDecompilerService(new FileSystemService(), new SilentConsole())
+                .DecompileMissingFilesAsync(
+                    assemblyPath,
+                    [
+                        new SourceFileInfo("/src/Colors.cs", null, false, null, LocalPath: "Colors.cs"),
+                        new SourceFileInfo("/src/IThing.cs", null, false, null, LocalPath: "IThing.cs"),
+                    ],
+                    pdbProvider.GetMetadataReader(),
+                    output,
+                    allDocumentsMissing: true);
+
+            Assert.Equal(2, written);
+            var all = string.Concat(new[] { "Colors.cs", "IThing.cs" }
+                .Select(f => File.ReadAllText(Path.Combine(output, f))));
+            Assert.Contains("enum Colors", all);
+            Assert.Contains("interface IThing", all);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static (string AssemblyPath, string PdbPath) Emit(string directory) =>
         EmitTrees(directory, "Sample",
         [

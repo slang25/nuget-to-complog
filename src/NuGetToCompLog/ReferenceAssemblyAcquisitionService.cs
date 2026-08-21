@@ -193,6 +193,47 @@ public class ReferenceAssemblyAcquisitionService
             }
         }
 
+        // Microsoft.Extensions.* ships standalone on nuget.org *and* inside the ASP.NET Core
+        // shared framework, so it is classified as a package reference and the ASP.NET pack is
+        // only probed when the compilation also referenced a Microsoft.AspNetCore.* assembly. A
+        // build that used the shared framework but touched only Extensions APIs therefore
+        // records references that resolve nowhere: a targeting-pack path is neither a NuGet path
+        // nor in the base pack, and no standalone package carries the shared framework's build.
+        // Probing the pack costs a download, so it only happens when an Extensions reference is
+        // genuinely unresolved - a merely MVID-mismatched one came from the package graph and is
+        // the version hunt's business. Once the pack is down, every assembly in it whose MVID is
+        // the recorded one is taken, so mismatched references benefit too.
+        if (aspNetRefs.Count == 0 && !string.IsNullOrEmpty(targetFramework))
+        {
+            var unresolvedExtensions = references
+                .Where(r => IsSharedFrameworkExtensionsCandidate(r.FileName) && r.Mvid != Guid.Empty)
+                .Where(r => !acquiredReferences.ContainsKey(Path.GetFileName(r.FileName)))
+                .ToList();
+            if (unresolvedExtensions.Count > 0)
+            {
+                AnsiConsole.MarkupLine(
+                    $"  [cyan]→[/] {unresolvedExtensions.Count} Microsoft.Extensions reference(s) unresolved - " +
+                    "trying the ASP.NET Core shared framework...");
+                var packPaths = KeepMvidMatches(
+                    await AcquireAspNetCoreReferencesAsync(targetFramework, unresolvedExtensions), references);
+                foreach (var (fileName, path) in packPaths)
+                {
+                    if (!acquiredReferences.ContainsKey(fileName))
+                    {
+                        withMvid++;
+                    }
+                    acquiredReferences[fileName] = path;
+                    mvidMatched++;
+                    mvidMismatched.Remove(fileName);
+                }
+                if (packPaths.Count > 0)
+                {
+                    AnsiConsole.MarkupLine(
+                        $"    [green]✓[/] {packPaths.Count} reference(s) came from the shared framework");
+                }
+            }
+        }
+
         // References recorded in the PDB that resolved nowhere: compile-time-only package
         // references (PrivateAssets="all", e.g. System.IO.Hashing) appear in neither the
         // targeting pack nor the nuspec dependency list. Probe the package named after the
@@ -533,6 +574,37 @@ public class ReferenceAssemblyAcquisitionService
 
         AnsiConsole.MarkupLine($"  [yellow]⚠[/] Could not acquire {packId} for {targetFramework}");
         return sdkResult;
+    }
+
+    /// <summary>
+    /// Whether the assembly is one of the Microsoft.Extensions.* assemblies that ship inside a
+    /// shared framework as well as standalone on nuget.org, so both are worth a candidate.
+    /// </summary>
+    private static bool IsSharedFrameworkExtensionsCandidate(string fileName) =>
+        Path.GetFileNameWithoutExtension(fileName)
+            .StartsWith("Microsoft.Extensions.", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The acquired assemblies that actually are the ones the PDB recorded, by MVID. Used when
+    /// a pack is probed speculatively: without a recorded MVID to confirm it, the pack's copy is
+    /// only a guess and must not displace the reference resolved by the normal path.
+    /// </summary>
+    private static Dictionary<string, string> KeepMvidMatches(
+        Dictionary<string, string> acquired,
+        List<MetadataReference> references)
+    {
+        var result = new Dictionary<string, string>();
+        foreach (var (fileName, path) in acquired)
+        {
+            var recorded = references
+                .FirstOrDefault(r => string.Equals(Path.GetFileName(r.FileName), fileName,
+                    StringComparison.OrdinalIgnoreCase))?.Mvid ?? Guid.Empty;
+            if (recorded != Guid.Empty && TryReadMvid(path) == recorded)
+            {
+                result[fileName] = path;
+            }
+        }
+        return result;
     }
 
     /// <summary>

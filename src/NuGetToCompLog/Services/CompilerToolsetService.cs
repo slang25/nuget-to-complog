@@ -77,6 +77,13 @@ public class CompilerToolsetService
                     return cscPath;
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // The user cancelled - falling through to the next feed (and ultimately to a
+                // null result) would let verify carry on with a different compiler than the
+                // PDB recorded. A feed's own timeout still counts as a feed failure below.
+                throw;
+            }
             catch (Exception ex)
             {
                 _console.MarkupLine($"  [dim]{new Uri(feed).Host}: {ex.Message.Replace("[", "[[").Replace("]", "]]")}[/]");
