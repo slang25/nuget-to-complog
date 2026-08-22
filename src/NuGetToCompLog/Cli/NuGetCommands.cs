@@ -13,6 +13,7 @@ public class NuGetCommands
 {
     private readonly ProcessPackageCommandHandler _processHandler;
     private readonly EjectPackageCommandHandler _ejectHandler;
+    private readonly SwapCommandHandler _swapHandler;
     private readonly DiffCommandHandler _diffHandler;
     private readonly ApplyCommandHandler _applyHandler;
     private readonly VerifyCommandHandler _verifyHandler;
@@ -29,6 +30,7 @@ public class NuGetCommands
     public NuGetCommands(
         ProcessPackageCommandHandler processHandler,
         EjectPackageCommandHandler ejectHandler,
+        SwapCommandHandler swapHandler,
         DiffCommandHandler diffHandler,
         ApplyCommandHandler applyHandler,
         VerifyCommandHandler verifyHandler,
@@ -36,6 +38,7 @@ public class NuGetCommands
     {
         _processHandler = processHandler;
         _ejectHandler = ejectHandler;
+        _swapHandler = swapHandler;
         _diffHandler = diffHandler;
         _applyHandler = applyHandler;
         _verifyHandler = verifyHandler;
@@ -149,6 +152,41 @@ public class NuGetCommands
             var result = await _applyHandler.HandleAsync(packageId, patchesDir);
 
             if (!result)
+            {
+                Environment.ExitCode = 1;
+                return;
+            }
+        }
+        finally
+        {
+            _console.ClearProgress();
+        }
+    }
+
+    /// <summary>
+    /// Swap a project's PackageReference for the package built from its recovered source:
+    /// ejects the package into an editable project with a generated .csproj and rewrites the
+    /// consuming project to use a ProjectReference instead.
+    /// </summary>
+    /// <param name="packageId">The NuGet package identifier of the PackageReference to swap</param>
+    /// <param name="version">The package version. If not specified, resolved from the project or Directory.Packages.props.</param>
+    /// <param name="project">Path to the consuming project (.csproj) or its directory. Defaults to the single .csproj in the current directory.</param>
+    /// <param name="output">Output directory for the ejected project. Defaults to ./patches/</param>
+    /// <param name="assembly">Which assembly to eject when the package ships several for one target framework. Defaults to the one named after the package.</param>
+    [Command("swap")]
+    public async Task Swap(
+        [Argument] string packageId,
+        [Argument] string? version = null,
+        string? project = null,
+        string? output = null,
+        string? assembly = null)
+    {
+        _console.SetIndeterminateProgress();
+        try
+        {
+            var result = await _swapHandler.HandleAsync(packageId, version, project, output, assembly);
+
+            if (result == null)
             {
                 Environment.ExitCode = 1;
                 return;

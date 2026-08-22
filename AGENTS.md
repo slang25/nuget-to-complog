@@ -39,6 +39,9 @@ dotnet run -- Microsoft.Extensions.Logging
 
 # Verify byte-for-byte reproducibility (rebuild from complog + compare)
 dotnet run -- verify Serilog 4.4.0
+
+# Swap a consuming project's PackageReference for the package built from source
+dotnet run -- swap Serilog --project path/to/App
 ```
 
 ## Running Tests

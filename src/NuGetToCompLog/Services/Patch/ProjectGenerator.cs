@@ -166,7 +166,7 @@ public class ProjectGenerator
         if (extraction.CompilerArgsFile != null)
         {
             var compilerArgs = await File.ReadAllLinesAsync(extraction.CompilerArgsFile);
-            var (argsDict, extraArgs) = ParseCompilerArgumentsFile(compilerArgs);
+            var (argsDict, extraArgs) = CompilerArgumentsFile.Parse(compilerArgs);
 
             // Compiler flags (preserved as-is to avoid breaking quoted values)
             foreach (var arg in extraArgs)
@@ -368,28 +368,5 @@ public class ProjectGenerator
 
         var json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
         await File.WriteAllTextAsync(Path.Combine(patchDir, "patch-metadata.json"), json);
-    }
-
-    private static (Dictionary<string, string> Args, List<string> ExtraArgs) ParseCompilerArgumentsFile(string[] lines)
-    {
-        var dict = new Dictionary<string, string>();
-        var extraArgs = new List<string>();
-
-        for (int i = 0; i < lines.Length; i++)
-        {
-            if (lines[i].StartsWith('/'))
-            {
-                extraArgs.Add(lines[i]);
-                continue;
-            }
-
-            if (i < lines.Length - 1)
-            {
-                dict[lines[i]] = lines[i + 1];
-                i++;
-            }
-        }
-
-        return (dict, extraArgs);
     }
 }
