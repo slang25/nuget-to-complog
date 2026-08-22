@@ -132,7 +132,7 @@ public class MsBuildProjectGenerator
                     new XElement("LogicalName", r.LogicalName)))));
         }
 
-        var dependencies = ReadNuspecDependencies(extraction, tfm);
+        var (dependencies, frameworkReferences) = ReadNuspecReferences(extraction, tfm);
         if (dependencies.Count > 0)
         {
             project.Add(new XElement("ItemGroup",
@@ -141,13 +141,25 @@ public class MsBuildProjectGenerator
                     new XAttribute("Version", d.Version)))));
         }
 
+        // A package that declares a <frameworkReference> (Microsoft.AspNetCore.App and friends)
+        // compiled against that shared framework, so its recovered source needs the same one.
+        if (frameworkReferences.Count > 0)
+        {
+            project.Add(new XElement("ItemGroup",
+                frameworkReferences.Select(name => new XElement("FrameworkReference",
+                    new XAttribute("Include", name)))));
+        }
+
         var csprojPath = Path.Combine(patchDir, $"{assemblyName}.csproj");
         await File.WriteAllTextAsync(csprojPath, project.ToString() + Environment.NewLine);
 
         await WriteIsolationStubsAsync(patchDir);
 
+        var frameworkSummary = frameworkReferences.Count > 0
+            ? $", {frameworkReferences.Count} framework references"
+            : string.Empty;
         _console.MarkupLine($"  [green]✓[/] Generated {Path.GetFileName(csprojPath)} " +
-            $"({dependencies.Count} package dependencies)");
+            $"({dependencies.Count} package dependencies{frameworkSummary})");
 
         return csprojPath;
     }
@@ -218,7 +230,14 @@ public class MsBuildProjectGenerator
             .ToList();
     }
 
-    private List<(string Id, string Version)> ReadNuspecDependencies(PackageExtractionResult extraction, string tfm)
+    /// <summary>
+    /// Reads the package's own dependencies for the target framework: both the package
+    /// dependencies and the shared-framework references, each taken from the nuspec group
+    /// nearest to <paramref name="tfm"/> the way NuGet would pick it at restore time.
+    /// </summary>
+    private (List<(string Id, string Version)> Dependencies, List<string> FrameworkReferences) ReadNuspecReferences(
+        PackageExtractionResult extraction,
+        string tfm)
     {
         try
         {
@@ -227,33 +246,46 @@ public class MsBuildProjectGenerator
                 : null;
             if (nuspecPath == null)
             {
-                return [];
+                return ([], []);
             }
 
             var reader = new NuspecReader(nuspecPath);
-            var groups = reader.GetDependencyGroups().ToList();
-            if (groups.Count == 0)
-            {
-                return [];
-            }
-
             var target = NuGetFramework.Parse(tfm);
-            var nearest = new FrameworkReducer().GetNearest(target, groups.Select(g => g.TargetFramework));
-            var group = groups.FirstOrDefault(g => Equals(g.TargetFramework, nearest));
-            if (group == null)
-            {
-                return [];
-            }
 
-            return group.Packages
+            var dependencies = NearestGroup(reader.GetDependencyGroups().ToList(), g => g.TargetFramework, target)
+                ?.Packages
                 .Select(p => (p.Id, p.VersionRange.MinVersion?.ToString() ?? p.VersionRange.ToShortString()))
-                .ToList();
+                .ToList() ?? [];
+
+            var frameworkReferences = NearestGroup(
+                    reader.GetFrameworkRefGroups().ToList(), g => g.TargetFramework, target)
+                ?.FrameworkReferences
+                .Select(f => f.Name)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? [];
+
+            return (dependencies, frameworkReferences);
         }
         catch (Exception ex)
         {
             _console.MarkupLine($"  [yellow]⚠[/] Could not read nuspec dependencies: {ex.Message}");
-            return [];
+            return ([], []);
         }
+    }
+
+    private static TGroup? NearestGroup<TGroup>(
+        List<TGroup> groups,
+        Func<TGroup, NuGetFramework> frameworkOf,
+        NuGetFramework target)
+        where TGroup : class
+    {
+        if (groups.Count == 0)
+        {
+            return null;
+        }
+
+        var nearest = new FrameworkReducer().GetNearest(target, groups.Select(frameworkOf));
+        return groups.FirstOrDefault(g => Equals(frameworkOf(g), nearest));
     }
 
     private static async Task WriteIsolationStubsAsync(string patchDir)

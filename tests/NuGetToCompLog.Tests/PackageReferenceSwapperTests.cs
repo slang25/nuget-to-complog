@@ -80,9 +80,9 @@ public class PackageReferenceSwapperTests : IDisposable
             </Project>
             """);
         var doc = XDocument.Load(path);
-        var reference = PackageReferenceSwapper.FindPackageReference(doc, "newtonsoft.json")!;
+        var references = PackageReferenceSwapper.FindPackageReferences(doc, "newtonsoft.json");
 
-        Assert.Equal("13.0.3", PackageReferenceSwapper.ResolveVersion(path, reference, "newtonsoft.json"));
+        Assert.Equal("13.0.3", PackageReferenceSwapper.ResolveVersion(path, references, "newtonsoft.json"));
     }
 
     [Fact]
@@ -98,9 +98,9 @@ public class PackageReferenceSwapperTests : IDisposable
             </Project>
             """);
         var doc = XDocument.Load(path);
-        var reference = PackageReferenceSwapper.FindPackageReference(doc, "Serilog")!;
+        var references = PackageReferenceSwapper.FindPackageReferences(doc, "Serilog");
 
-        Assert.Equal("4.4.0", PackageReferenceSwapper.ResolveVersion(path, reference, "Serilog"));
+        Assert.Equal("4.4.0", PackageReferenceSwapper.ResolveVersion(path, references, "Serilog"));
     }
 
     [Fact]
@@ -121,9 +121,9 @@ public class PackageReferenceSwapperTests : IDisposable
             </Project>
             """, subdir: "src");
         var doc = XDocument.Load(path);
-        var reference = PackageReferenceSwapper.FindPackageReference(doc, "Serilog")!;
+        var references = PackageReferenceSwapper.FindPackageReferences(doc, "Serilog");
 
-        Assert.Equal("4.4.0", PackageReferenceSwapper.ResolveVersion(path, reference, "Serilog"));
+        Assert.Equal("4.4.0", PackageReferenceSwapper.ResolveVersion(path, references, "Serilog"));
     }
 
     [Fact]
@@ -137,9 +137,9 @@ public class PackageReferenceSwapperTests : IDisposable
             </Project>
             """);
         var doc = XDocument.Load(path);
-        var reference = PackageReferenceSwapper.FindPackageReference(doc, "Serilog")!;
+        var references = PackageReferenceSwapper.FindPackageReferences(doc, "Serilog");
 
-        Assert.Equal("4.0.0", PackageReferenceSwapper.ResolveVersion(path, reference, "Serilog"));
+        Assert.Equal("4.0.0", PackageReferenceSwapper.ResolveVersion(path, references, "Serilog"));
     }
 
     [Fact]
@@ -153,9 +153,9 @@ public class PackageReferenceSwapperTests : IDisposable
             </Project>
             """);
         var doc = XDocument.Load(path);
-        var reference = PackageReferenceSwapper.FindPackageReference(doc, "Serilog")!;
+        var references = PackageReferenceSwapper.FindPackageReferences(doc, "Serilog");
 
-        Assert.Null(PackageReferenceSwapper.ResolveVersion(path, reference, "Serilog"));
+        Assert.Null(PackageReferenceSwapper.ResolveVersion(path, references, "Serilog"));
     }
 
     [Fact]
@@ -226,6 +226,30 @@ public class PackageReferenceSwapperTests : IDisposable
     }
 
     [Fact]
+    public void Swap_PreservesByteOrderMark()
+    {
+        var original = "<Project Sdk=\"Microsoft.NET.Sdk\">\n" +
+                       "  <ItemGroup>\n" +
+                       "    <PackageReference Include=\"Serilog\" Version=\"4.4.0\" />\n" +
+                       "  </ItemGroup>\n" +
+                       "</Project>\n";
+        var path = Path.Combine(_tempDir, "App.csproj");
+        File.WriteAllBytes(path, new byte[] { 0xEF, 0xBB, 0xBF }
+            .Concat(System.Text.Encoding.UTF8.GetBytes(original))
+            .ToArray());
+
+        PackageReferenceSwapper.Swap(path, "Serilog", "patches/Serilog+4.4.0/Serilog.csproj");
+
+        var bytes = File.ReadAllBytes(path);
+        Assert.Equal(new byte[] { 0xEF, 0xBB, 0xBF }, bytes[..3]);
+        Assert.Equal(
+            original.Replace(
+                "<PackageReference Include=\"Serilog\" Version=\"4.4.0\" />",
+                "<ProjectReference Include=\"patches/Serilog+4.4.0/Serilog.csproj\" />"),
+            System.Text.Encoding.UTF8.GetString(bytes[3..]));
+    }
+
+    [Fact]
     public void Swap_CarriesOverAssetMetadata()
     {
         var path = WriteProject("""
@@ -259,6 +283,139 @@ public class PackageReferenceSwapperTests : IDisposable
 
         var text = File.ReadAllText(path);
         Assert.Contains("<ProjectReference Include=\"patches/Serilog+4.4.0/Serilog.csproj\" />", text);
+    }
+
+    [Fact]
+    public void ResolveVersion_ConflictingVersions_Throws()
+    {
+        var path = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+                <PackageReference Include="Serilog" Version="3.1.1" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+                <PackageReference Include="Serilog" Version="4.4.0" />
+              </ItemGroup>
+            </Project>
+            """);
+        var doc = XDocument.Load(path);
+        var references = PackageReferenceSwapper.FindPackageReferences(doc, "Serilog");
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => PackageReferenceSwapper.ResolveVersion(path, references, "Serilog"));
+        Assert.Contains("3.1.1", ex.Message);
+        Assert.Contains("4.4.0", ex.Message);
+    }
+
+    [Fact]
+    public void ResolveVersion_ConflictingCentralVersions_Throws()
+    {
+        File.WriteAllText(Path.Combine(_tempDir, "Directory.Packages.props"), """
+            <Project>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+                <PackageVersion Include="Serilog" Version="3.1.1" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+                <PackageVersion Include="Serilog" Version="4.4.0" />
+              </ItemGroup>
+            </Project>
+            """);
+        var path = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Serilog" />
+              </ItemGroup>
+            </Project>
+            """);
+        var doc = XDocument.Load(path);
+        var references = PackageReferenceSwapper.FindPackageReferences(doc, "Serilog");
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => PackageReferenceSwapper.ResolveVersion(path, references, "Serilog"));
+        Assert.Contains("3.1.1", ex.Message);
+        Assert.Contains("4.4.0", ex.Message);
+    }
+
+    [Fact]
+    public void Swap_ReplacesEveryConditionalReference()
+    {
+        var original = """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFrameworks>net472;net10.0</TargetFrameworks>
+              </PropertyGroup>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+                <PackageReference Include="Serilog" Version="4.4.0" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+                <PackageReference Include="Serilog" Version="4.4.0" PrivateAssets="all" />
+              </ItemGroup>
+            </Project>
+            """;
+        var path = WriteProject(original);
+
+        var replaced = PackageReferenceSwapper.Swap(path, "Serilog", "patches/Serilog+4.4.0/Serilog.csproj");
+
+        Assert.Equal(2, replaced);
+        var expected = original
+            .Replace(
+                "<PackageReference Include=\"Serilog\" Version=\"4.4.0\" />",
+                "<ProjectReference Include=\"patches/Serilog+4.4.0/Serilog.csproj\" />")
+            .Replace(
+                "<PackageReference Include=\"Serilog\" Version=\"4.4.0\" PrivateAssets=\"all\" />",
+                "<ProjectReference Include=\"patches/Serilog+4.4.0/Serilog.csproj\" PrivateAssets=\"all\" />");
+        Assert.Equal(expected, File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void Swap_PreservesQuotingEntitiesAndComments()
+    {
+        var original = """
+            <Project Sdk='Microsoft.NET.Sdk'>
+              <!-- keep this comment -->
+              <PropertyGroup>
+                <Description>logging &amp; more</Description>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include='Serilog' Version='4.4.0' PrivateAssets='all'/>
+              </ItemGroup>
+            </Project>
+            """;
+        var path = WriteProject(original);
+
+        PackageReferenceSwapper.Swap(path, "Serilog", "patches/Serilog+4.4.0/Serilog.csproj");
+
+        var expected = original.Replace(
+            "<PackageReference Include='Serilog' Version='4.4.0' PrivateAssets='all'/>",
+            "<ProjectReference Include='patches/Serilog+4.4.0/Serilog.csproj' PrivateAssets='all'/>");
+        Assert.Equal(expected, File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void Swap_KeepsChildMetadataAndComments()
+    {
+        var original = """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Serilog">
+                  <Version>4.4.0</Version>
+                  <!-- not part of our public API -->
+                  <PrivateAssets>all</PrivateAssets>
+                </PackageReference>
+              </ItemGroup>
+            </Project>
+            """;
+        var path = WriteProject(original);
+
+        PackageReferenceSwapper.Swap(path, "Serilog", "patches/Serilog+4.4.0/Serilog.csproj");
+
+        var expected = original
+            .Replace(
+                "<PackageReference Include=\"Serilog\">",
+                "<ProjectReference Include=\"patches/Serilog+4.4.0/Serilog.csproj\">")
+            .Replace("\n      <Version>4.4.0</Version>", "")
+            .Replace("</PackageReference>", "</ProjectReference>");
+        Assert.Equal(expected, File.ReadAllText(path));
     }
 
     [Fact]

@@ -35,7 +35,7 @@ This:
 2. Ejects the package into `./patches/Serilog+<Version>/` exactly like `eject` does
 3. Generates an SDK-style `Serilog.csproj` over the ejected `src/` tree, carrying over the
    recorded compiler settings (language version, defines, optimization, strong naming) and
-   re-declaring the package's nuspec dependencies
+   re-declaring the package's nuspec dependencies and framework references
 4. Rewrites the consuming project's `PackageReference` into a `ProjectReference`
 
 From then on, plain `dotnet build` compiles the dependency from its recovered source. Edit files
@@ -46,6 +46,12 @@ package transitively (e.g. `Serilog.Sinks.Console` → your source-built `Serilo
 
 Details worth knowing:
 
+- Multi-targeting projects that reference the package from several conditional `ItemGroup`s get
+  every matching `PackageReference` swapped. If they pin different versions, pass the version
+  explicitly (`swap Serilog 4.4.0`) to say which one to eject.
+- Only the swapped items are rewritten: the rest of the project file — its formatting, comments,
+  attribute quoting and line endings — is left byte-for-byte alone, so the diff is one line per
+  swapped reference.
 - The generated `.csproj` approximates the original compilation; the byte-exact rebuild path
   remains `build.rsp` + `apply`. For validating an idea or debugging, the approximation is the
   point — it's editable, IDE-friendly, and incremental.

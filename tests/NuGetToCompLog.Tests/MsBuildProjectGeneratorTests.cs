@@ -161,6 +161,61 @@ public class MsBuildProjectGeneratorTests : IDisposable
     }
 
     [Fact]
+    public async Task Declares_Nuspec_Framework_References_For_Nearest_Tfm()
+    {
+        var extraction = CreateExtraction(
+            compilerArgLines: [],
+            tfm: "net6.0",
+            nuspec: """
+                <?xml version="1.0" encoding="utf-8"?>
+                <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+                  <metadata>
+                    <id>TestPackage</id>
+                    <version>1.2.3</version>
+                    <authors>test</authors>
+                    <description>test</description>
+                    <frameworkReferences>
+                      <group targetFramework=".NETStandard2.0" />
+                      <group targetFramework="net6.0">
+                        <frameworkReference name="Microsoft.AspNetCore.App" />
+                      </group>
+                    </frameworkReferences>
+                  </metadata>
+                </package>
+                """);
+        var patchDir = CreatePatchDir(("Class1.cs", "public class Class1 { }"));
+
+        var csprojPath = await CreateGenerator().GenerateAsync(extraction, patchDir);
+
+        var doc = XDocument.Load(csprojPath);
+        var frameworkReference = doc.Descendants("FrameworkReference").Single();
+        Assert.Equal("Microsoft.AspNetCore.App", (string?)frameworkReference.Attribute("Include"));
+    }
+
+    [Fact]
+    public async Task Omits_Framework_References_When_Nuspec_Declares_None()
+    {
+        var extraction = CreateExtraction(
+            compilerArgLines: [],
+            nuspec: """
+                <?xml version="1.0" encoding="utf-8"?>
+                <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+                  <metadata>
+                    <id>TestPackage</id>
+                    <version>1.2.3</version>
+                    <authors>test</authors>
+                    <description>test</description>
+                  </metadata>
+                </package>
+                """);
+        var patchDir = CreatePatchDir(("Class1.cs", "public class Class1 { }"));
+
+        var csprojPath = await CreateGenerator().GenerateAsync(extraction, patchDir);
+
+        Assert.Empty(XDocument.Load(csprojPath).Descendants("FrameworkReference"));
+    }
+
+    [Fact]
     public async Task Disables_Generated_Attributes_When_Sources_Contain_Them()
     {
         var extraction = CreateExtraction(compilerArgLines: []);

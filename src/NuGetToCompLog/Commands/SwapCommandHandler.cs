@@ -45,8 +45,8 @@ public class SwapCommandHandler
             var projectPath = PackageReferenceSwapper.FindProjectFile(project, workingDirectory);
 
             var projectDoc = XDocument.Load(projectPath);
-            var packageReference = PackageReferenceSwapper.FindPackageReference(projectDoc, packageId);
-            if (packageReference == null)
+            var packageReferences = PackageReferenceSwapper.FindPackageReferences(projectDoc, packageId);
+            if (packageReferences.Count == 0)
             {
                 _console.MarkupLine($"[red]✗[/] No PackageReference to [cyan]{packageId}[/] in [dim]{projectPath}[/]");
                 var existing = PackageReferenceSwapper.ListPackageReferences(projectDoc);
@@ -57,7 +57,7 @@ public class SwapCommandHandler
                 return null;
             }
 
-            version ??= PackageReferenceSwapper.ResolveVersion(projectPath, packageReference, packageId);
+            version ??= PackageReferenceSwapper.ResolveVersion(projectPath, packageReferences, packageId);
             if (version == null)
             {
                 _console.MarkupLine($"[red]✗[/] Could not determine the version of [cyan]{packageId}[/] " +
@@ -103,8 +103,9 @@ public class SwapCommandHandler
             var csprojPath = await _msbuildProjectGenerator.GenerateAsync(result, patchDir);
 
             var relativeCsprojPath = Path.GetRelativePath(Path.GetDirectoryName(projectPath)!, csprojPath);
-            PackageReferenceSwapper.Swap(projectPath, packageId, relativeCsprojPath);
-            _console.MarkupLine($"  [green]✓[/] Replaced PackageReference with ProjectReference in {Path.GetFileName(projectPath)}");
+            var replaced = PackageReferenceSwapper.Swap(projectPath, packageId, relativeCsprojPath);
+            var items = replaced == 1 ? "PackageReference" : $"{replaced} PackageReference items";
+            _console.MarkupLine($"  [green]✓[/] Replaced {items} with ProjectReference in {Path.GetFileName(projectPath)}");
 
             _console.WriteLine();
             _console.WritePanel(
