@@ -17,6 +17,56 @@ This is inspired by [patch-package](https://github.com/ds300/patch-package) from
 - .NET 10 SDK or later
 - The target NuGet package must ship with portable PDBs (embedded or via a `.snupkg` symbols package) that contain SourceLink information. Most modern, open-source NuGet packages meet this requirement.
 
+## The fast path: swap
+
+If your goal is to edit a dependency of a project you're working on, `swap` does the whole loop
+in one command:
+
+```bash
+# Run from your project (or solution) directory
+dotnet run -- swap Serilog --project src/MyApp
+```
+
+This:
+
+1. Finds the `PackageReference` for `Serilog` in the consuming project and resolves its version
+   (from the `Version` attribute, a `<Version>` element, `VersionOverride`, or central package
+   management via `Directory.Packages.props`) — or takes an explicit version argument
+2. Ejects the package into `./patches/Serilog+<Version>/` exactly like `eject` does
+3. Generates an SDK-style `Serilog.csproj` over the ejected `src/` tree, carrying over the
+   recorded compiler settings (language version, defines, optimization, strong naming) and
+   re-declaring the package's nuspec dependencies and framework references
+4. Rewrites the consuming project's `PackageReference` into a `ProjectReference`
+
+From then on, plain `dotnet build` compiles the dependency from its recovered source. Edit files
+under `patches/Serilog+<Version>/src/` and build your project as usual — no manual DLL copying.
+Because the generated project declares the package's own `PackageId` and `Version`, NuGet's
+project-over-package rule substitutes it even for *other* packages that depend on the swapped
+package transitively (e.g. `Serilog.Sinks.Console` → your source-built `Serilog`).
+
+Details worth knowing:
+
+- Multi-targeting projects that reference the package from several conditional `ItemGroup`s get
+  every matching `PackageReference` swapped. If they pin different versions, pass the version
+  explicitly (`swap Serilog 4.4.0`) to say which one to eject.
+- Only the swapped items are rewritten: the rest of the project file — its formatting, comments,
+  attribute quoting and line endings — is left byte-for-byte alone, so the diff is one line per
+  swapped reference.
+- The generated `.csproj` approximates the original compilation; the byte-exact rebuild path
+  remains `build.rsp` + `apply`. For validating an idea or debugging, the approximation is the
+  point — it's editable, IDE-friendly, and incremental.
+- The patch directory gets stub `Directory.Build.props` / `Directory.Build.targets` /
+  `Directory.Packages.props` files so your repo's central package management, analyzers, and
+  custom targets don't leak into the reconstructed compilation.
+- Strong-named packages are public-signed with the original public key, so strong-name
+  identity (and `InternalsVisibleTo` friends) keep working.
+- `diff` works on a swapped package the same as an ejected one, so you can still capture your
+  edits as a committable `.patch` file.
+- To undo the swap, revert the consuming project file (`git checkout -- src/MyApp/MyApp.csproj`)
+  and delete the patch directory if you don't need it.
+
+The rest of this guide covers the manual, byte-exact workflow.
+
 ## Workflow
 
 The workflow has four steps: **eject**, **edit**, **diff**, **apply**.

@@ -70,6 +70,25 @@ To make rebuilds faithful, the tool:
 - reconstructs strong naming: `/publicsign` from the assembly's public key, or full signing
   when the repo commits its `.snk` (RSA signing is deterministic)
 
+### Swapping a dependency for its source
+
+```bash
+# Replace a project's PackageReference with the package built from its recovered source
+nuget-to-complog swap Serilog --project src/MyApp
+```
+
+The `swap` command finds the `PackageReference` in the consuming project (resolving the version
+from the project file or `Directory.Packages.props`), ejects the package's original source into
+`patches/<PackageId>+<Version>/`, generates an SDK-style `.csproj` over it, and rewrites the
+`PackageReference` into a `ProjectReference`. From then on plain `dotnet build` compiles the
+dependency from source — edit files under `patches/<PackageId>+<Version>/src/` and build as
+usual. Other packages that depend on the swapped package pick up the source-built project too,
+via NuGet's project-over-package rule.
+
+Undo the swap by reverting the consuming project file (`git checkout`); capture your edits as a
+committable patch with `nuget-to-complog diff <PackageId>`. See
+[docs/guides/PATCH_PACKAGE.md](./docs/guides/PATCH_PACKAGE.md) for the full patching workflow.
+
 ### Packages that ship more than one assembly
 
 A working directory describes one compilation, so a package that ships several assemblies for the

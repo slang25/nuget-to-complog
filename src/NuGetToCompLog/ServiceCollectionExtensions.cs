@@ -105,6 +105,7 @@ public static class ServiceCollectionExtensions
 
         // Patch services
         services.AddSingleton<ProjectGenerator>();
+        services.AddSingleton<MsBuildProjectGenerator>();
         services.AddSingleton<PatchManager>();
         services.AddSingleton<UnifiedDiffGenerator>();
         services.AddSingleton<PatchApplier>();
@@ -114,6 +115,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<PackageAnalysisPipeline>();
         services.AddSingleton<ProcessPackageCommandHandler>();
         services.AddSingleton<EjectPackageCommandHandler>();
+        services.AddSingleton<SwapCommandHandler>();
         services.AddSingleton<DiffCommandHandler>();
         services.AddSingleton<ApplyCommandHandler>();
         services.AddSingleton<CompilerToolsetService>();
