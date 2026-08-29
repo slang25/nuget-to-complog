@@ -23,6 +23,10 @@
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <!-- The agent skill ships inside the tool so `nuget-to-complog skill` can never drift from
+         the release; skills/swap-nuget-dependency/SKILL.md stays the canonical repo copy that
+         gh skill / npx skills install directly from GitHub. -->
+    <EmbeddedResource Include="../../skills/swap-nuget-dependency/SKILL.md" LogicalName="SKILL.md" />
   </ItemGroup>
 
   <ItemGroup>

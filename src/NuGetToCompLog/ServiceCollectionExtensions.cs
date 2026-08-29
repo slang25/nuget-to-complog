@@ -116,6 +116,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ProcessPackageCommandHandler>();
         services.AddSingleton<EjectPackageCommandHandler>();
         services.AddSingleton<SwapCommandHandler>();
+        services.AddSingleton<SkillCommandHandler>();
         services.AddSingleton<DiffCommandHandler>();
         services.AddSingleton<ApplyCommandHandler>();
         services.AddSingleton<CompilerToolsetService>();

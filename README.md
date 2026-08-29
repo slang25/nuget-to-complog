@@ -89,6 +89,31 @@ Undo the swap by reverting the consuming project file (`git checkout`); capture 
 committable patch with `nuget-to-complog diff <PackageId>`. See
 [docs/guides/PATCH_PACKAGE.md](./docs/guides/PATCH_PACKAGE.md) for the full patching workflow.
 
+### Teaching your coding agent (agent skill)
+
+The tool bundles an [Agent Skill](https://agentskills.io) that teaches coding agents (Claude
+Code, Codex CLI, Gemini CLI, and others) to use `swap` whenever they need to look inside or
+edit a NuGet dependency — instead of decompiling, cloning the upstream repo, or copying DLLs
+around:
+
+```bash
+# Print the skill to stdout
+nuget-to-complog skill
+
+# Install it for Claude Code (user-level, ~/.claude/skills/)
+nuget-to-complog skill --install
+
+# Or project-level / other agents
+nuget-to-complog skill --install --project
+nuget-to-complog skill --install --agent codex   # claude | codex | gemini | agents
+```
+
+The installed skill is stamped with the tool version; after `dotnet tool update -g
+nugettocomplog`, re-run `nuget-to-complog skill --install` to refresh it. The canonical copy
+lives at [skills/swap-nuget-dependency](./skills/swap-nuget-dependency/SKILL.md), so
+`npx skills add slang25/nuget-to-complog` and `gh skill install slang25/nuget-to-complog`
+work too.
+
 ### Packages that ship more than one assembly
 
 A working directory describes one compilation, so a package that ships several assemblies for the

@@ -14,6 +14,7 @@ public class NuGetCommands
     private readonly ProcessPackageCommandHandler _processHandler;
     private readonly EjectPackageCommandHandler _ejectHandler;
     private readonly SwapCommandHandler _swapHandler;
+    private readonly SkillCommandHandler _skillHandler;
     private readonly DiffCommandHandler _diffHandler;
     private readonly ApplyCommandHandler _applyHandler;
     private readonly VerifyCommandHandler _verifyHandler;
@@ -31,6 +32,7 @@ public class NuGetCommands
         ProcessPackageCommandHandler processHandler,
         EjectPackageCommandHandler ejectHandler,
         SwapCommandHandler swapHandler,
+        SkillCommandHandler skillHandler,
         DiffCommandHandler diffHandler,
         ApplyCommandHandler applyHandler,
         VerifyCommandHandler verifyHandler,
@@ -39,6 +41,7 @@ public class NuGetCommands
         _processHandler = processHandler;
         _ejectHandler = ejectHandler;
         _swapHandler = swapHandler;
+        _skillHandler = skillHandler;
         _diffHandler = diffHandler;
         _applyHandler = applyHandler;
         _verifyHandler = verifyHandler;
@@ -160,6 +163,28 @@ public class NuGetCommands
         finally
         {
             _console.ClearProgress();
+        }
+    }
+
+    /// <summary>
+    /// Print the bundled agent skill (SKILL.md) that teaches coding agents the swap workflow,
+    /// or install it into an agent's skills directory.
+    /// </summary>
+    /// <param name="install">Install the skill instead of printing it to stdout.</param>
+    /// <param name="project">Install to the current directory's project-level skills folder (e.g. ./.claude/skills/) instead of the user-level one.</param>
+    /// <param name="agent">Which agent's skills directory to install to: claude, codex, gemini, or agents (the vendor-neutral .agents/skills).</param>
+    /// <param name="force">Overwrite the installed skill even if it has local modifications.</param>
+    [Command("skill")]
+    public async Task Skill(
+        bool install = false,
+        bool project = false,
+        string agent = "claude",
+        bool force = false)
+    {
+        var result = await _skillHandler.HandleAsync(install, project, agent, force);
+        if (!result)
+        {
+            Environment.ExitCode = 1;
         }
     }
 
