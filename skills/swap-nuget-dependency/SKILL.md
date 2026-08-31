@@ -1,8 +1,9 @@
 ---
 name: swap-nuget-dependency
-description: Swap a .NET project's PackageReference for the same NuGet package built from its recovered source, in one command — the dependency becomes editable C# that plain `dotnet build` compiles. Use this whenever you want to look inside or change the behavior of a NuGet dependency of a project you're working on: validating a suspicion about what a library actually does, adding a log line or instrumentation inside a package, reproducing or fixing a suspected bug in a dependency, or preparing a patch to submit upstream. Reach for this instead of decompiling, cloning the library's GitHub repo, or manually copying patched DLLs — it is faster, more reliable, and far cheaper in tokens. Prefer this skill over patch-nuget-package when the goal is to edit a dependency in the context of a consuming project or solution; use patch-nuget-package only when you need a byte-exact standalone rebuild. Requires the nuget-to-complog tool.
+description: "Swap a .NET project's PackageReference for the same NuGet package built from its recovered source, in one command — the dependency becomes editable C# that plain `dotnet build` compiles. Use this whenever you want to look inside or change the behavior of a NuGet dependency of a project you're working on: validating a suspicion about what a library actually does, adding a log line or instrumentation inside a package, reproducing or fixing a suspected bug in a dependency, or preparing a patch to submit upstream. Reach for this instead of decompiling, cloning the library's GitHub repo, or manually copying patched DLLs — it is faster, more reliable, and far cheaper in tokens. Prefer this skill over patch-nuget-package when the goal is to edit a dependency in the context of a consuming project or solution; use patch-nuget-package only when you need a byte-exact standalone rebuild. Requires the nuget-to-complog tool."
 metadata:
   version: dev
+  checksum: dev
   source: nugettocomplog
 ---
 
@@ -13,7 +14,7 @@ metadata:
 Why this beats the alternatives:
 
 - **Decompiling** gives you code you can read but not build, and it differs from what the author wrote. Swap gives you the *actual shipped source*, buildable.
-- **Cloning the upstream repo** means finding the right tag, matching the build configuration, and wiring the project in by hand — slow, error-prone, and the repo build often needs tooling the consuming machine doesn't have. Swap recovers exactly the source that produced the shipped assembly.
+- **Cloning the upstream repo** means finding the right tag, matching the build configuration, and wiring the project in by hand — slow, error-prone, and the repo build often needs tooling the consuming machine doesn't have. Swap recovers the source that produced the shipped assembly, verified against the PDB checksums.
 - **Patched-DLL copying** breaks on every rebuild. After a swap, the normal build does the right thing, including for *other* packages that depend on the swapped one (NuGet's project-over-package rule substitutes your source-built project transitively).
 
 ## Prerequisites
@@ -88,6 +89,7 @@ rm -rf patches/<PackageId>+<Version>
 - **The generated project approximates the original compilation.** It carries over language version, defines, optimization, nullable, and unsafe settings from the PDB, but it is not byte-exact. That's fine — for editing and validating, editable and incremental is the point. If you need a byte-for-byte rebuild, that path is `build.rsp` + `nuget-to-complog apply` (see docs/guides/PATCH_PACKAGE.md in the nuget-to-complog repo).
 - **Strong naming keeps working.** Strong-named packages are public-signed with the original key, so assembly identity and `InternalsVisibleTo` friendships survive the swap.
 - **Your repo's build config won't leak in.** The patch directory gets stub `Directory.Build.props` / `Directory.Build.targets` / `Directory.Packages.props`, so the consuming repo's central package management, analyzers, and custom targets don't apply to the reconstructed project.
+- **A few files may be decompiled stand-ins.** Recovery works through SourceLink; when a document can't be fetched, the tool decompiles it from the shipped assembly instead and says so in the swap output (`Decompiled N missing file(s)`). Stand-ins build and test fine, but they are not the author's text — if your edit lands in one, don't present that hunk upstream as authored source; locate the corresponding file in the upstream repo first.
 - **Multi-targeting consumers:** every conditional `PackageReference` for the package is swapped. If different `ItemGroup`s pin different versions, pass the version explicitly to say which one to eject.
 - **Packages shipping several assemblies** (e.g. `nunit.framework` + `nunit.framework.legacy`): the default is the assembly named after the package; pick another with `--assembly <name>.dll`.
 

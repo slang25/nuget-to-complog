@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using NuGetToCompLog.Abstractions;
 
@@ -7,12 +9,16 @@ namespace NuGetToCompLog.Commands;
 /// <summary>
 /// Handles the skill command: prints the bundled agent skill (SKILL.md) to stdout, or installs
 /// it into an agent's skills directory so coding agents discover the swap workflow on their own.
-/// The skill ships embedded in the tool so the installed copy always matches the tool version;
-/// the frontmatter version stamp is what makes re-install after a tool update a clean refresh.
+/// The skill ships embedded in the tool so the installed copy always matches the tool version.
+/// Rendered copies carry a version stamp (so a re-install after a tool update reads as a clean
+/// refresh) and a content checksum (so a hand-edited copy is recognised as modified no matter
+/// which tool version originally installed it).
 /// </summary>
 public partial class SkillCommandHandler
 {
     public const string SkillName = "swap-nuget-dependency";
+
+    private const string StampPlaceholder = "dev";
 
     private readonly IConsoleWriter _console;
 
@@ -94,9 +100,10 @@ public partial class SkillCommandHandler
     }
 
     /// <summary>
-    /// The tool is the source of truth for the skill, so any copy carrying a different version
-    /// stamp is simply replaced. A copy whose stamp matches ours (or is missing) but whose
-    /// content differs was edited by hand — that one needs consent to overwrite.
+    /// The tool is the source of truth for the skill, so a pristine managed copy — one whose
+    /// content checksum still verifies, whatever tool version wrote it — is simply replaced.
+    /// Anything that fails verification was edited by hand (or written by hand); that needs
+    /// consent to overwrite.
     /// </summary>
     public static InstallDecision DecideInstall(string? existing, string rendered, bool force)
     {
@@ -110,26 +117,21 @@ public partial class SkillCommandHandler
             return InstallDecision.UpToDate;
         }
 
-        var existingVersion = ReadStampedVersion(existing);
-        var currentVersion = ReadStampedVersion(rendered);
-        if (existingVersion != null && existingVersion != currentVersion)
-        {
-            return InstallDecision.Write;
-        }
-
-        return InstallDecision.Conflict;
+        return VerifyChecksum(existing) ? InstallDecision.Write : InstallDecision.Conflict;
     }
 
     /// <summary>
-    /// Loads the embedded SKILL.md and stamps the current tool version into the frontmatter's
-    /// metadata.version, replacing the "dev" placeholder the repository copy carries.
+    /// Loads the embedded SKILL.md, stamps the current tool version into the frontmatter's
+    /// metadata.version, then stamps metadata.checksum with the content's SHA-256 (computed
+    /// with the checksum field itself still holding the placeholder).
     /// </summary>
     public static string RenderSkill()
     {
         using var stream = typeof(SkillCommandHandler).Assembly.GetManifestResourceStream("SKILL.md")
             ?? throw new InvalidOperationException("Embedded SKILL.md resource not found");
         using var reader = new StreamReader(stream);
-        return StampVersion(reader.ReadToEnd(), ToolVersion());
+        var stamped = StampVersion(reader.ReadToEnd(), ToolVersion());
+        return ReplaceInFrontmatter(stamped, ChecksumRegex(), ComputeChecksum(stamped));
     }
 
     public static string ToolVersion()
@@ -142,16 +144,76 @@ public partial class SkillCommandHandler
     }
 
     public static string StampVersion(string content, string version)
-        => VersionStampRegex().Replace(content, m => $"{m.Groups[1].Value}{version}", 1);
+        => ReplaceInFrontmatter(content, VersionRegex(), version);
 
     public static string? ReadStampedVersion(string content)
+        => ReadFromFrontmatter(content, VersionRegex());
+
+    /// <summary>
+    /// True when metadata.checksum matches the SHA-256 of the content with the checksum field
+    /// reset to its placeholder — i.e. the file is byte-identical to what some release of the
+    /// tool rendered.
+    /// </summary>
+    public static bool VerifyChecksum(string content)
     {
-        var match = VersionStampRegex().Match(content);
+        var stored = ReadFromFrontmatter(content, ChecksumRegex());
+        if (stored == null || stored == StampPlaceholder)
+        {
+            return false;
+        }
+
+        var unstamped = ReplaceInFrontmatter(content, ChecksumRegex(), StampPlaceholder);
+        return stored == ComputeChecksum(unstamped);
+    }
+
+    private static string ComputeChecksum(string content)
+        => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
+
+    /// <summary>
+    /// The YAML frontmatter is the span between the opening "---" and the next line starting
+    /// "---". Stamp fields are only ever read or replaced inside it — an indented "version:" in
+    /// the Markdown body (a code sample, say) must never be mistaken for the stamp.
+    /// </summary>
+    private static (int Start, int Length)? FrontmatterBounds(string content)
+    {
+        if (!content.StartsWith("---\n") && !content.StartsWith("---\r\n"))
+        {
+            return null;
+        }
+
+        var start = content.IndexOf('\n') + 1;
+        var end = content.IndexOf("\n---", start, StringComparison.Ordinal);
+        return end < 0 ? null : (start, end - start);
+    }
+
+    private static string ReplaceInFrontmatter(string content, Regex field, string value)
+    {
+        if (FrontmatterBounds(content) is not { } bounds)
+        {
+            return content;
+        }
+
+        var (start, length) = bounds;
+        var frontmatter = content.Substring(start, length);
+        var replaced = field.Replace(frontmatter, m => $"{m.Groups[1].Value}{value}", 1);
+        return content[..start] + replaced + content[(start + length)..];
+    }
+
+    private static string? ReadFromFrontmatter(string content, Regex field)
+    {
+        if (FrontmatterBounds(content) is not { } bounds)
+        {
+            return null;
+        }
+
+        var (start, length) = bounds;
+        var match = field.Match(content.Substring(start, length));
         return match.Success ? match.Groups[2].Value.Trim().Trim('"') : null;
     }
 
-    // Matches the metadata version line in the YAML frontmatter (indented, so it cannot be
-    // confused with a top-level key).
     [GeneratedRegex(@"(?m)^(\s+version:\s*)(.*)$")]
-    private static partial Regex VersionStampRegex();
+    private static partial Regex VersionRegex();
+
+    [GeneratedRegex(@"(?m)^(\s+checksum:\s*)(.*)$")]
+    private static partial Regex ChecksumRegex();
 }
