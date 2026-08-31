@@ -1,5 +1,5 @@
 {
-  "skill_name": "patch-nuget-package",
+  "skill_name": "swap-nuget-dependency",
   "evals": [
     {
       "id": 1,

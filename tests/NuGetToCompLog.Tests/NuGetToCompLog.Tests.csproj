@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\NuGetToCompLog\NuGetToCompLog.csproj" />
+    <ProjectReference Include="..\..\src\NuGetToCompLog.SourceBuild\NuGetToCompLog.SourceBuild.csproj" />
   </ItemGroup>
 
 </Project>

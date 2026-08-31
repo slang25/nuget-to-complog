@@ -13,6 +13,7 @@ using NuGetToCompLog.Services.NuGet;
 using NuGetToCompLog.Services.Patch;
 using NuGetToCompLog.Services.Pdb;
 using NuGetToCompLog.Services.References;
+using NuGetToCompLog.Services.SourceBuild;
 
 namespace NuGetToCompLog;
 
@@ -120,7 +121,12 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<DiffCommandHandler>();
         services.AddSingleton<ApplyCommandHandler>();
         services.AddSingleton<CompilerToolsetService>();
+        services.AddSingleton<CscInvoker>();
+        services.AddSingleton<ComplogRebuilder>();
         services.AddSingleton<VerifyCommandHandler>();
+
+        // Source build services
+        services.AddSingleton<SourceBuildCommandHandler>();
 
         return services;
     }

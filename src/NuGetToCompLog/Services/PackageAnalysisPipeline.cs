@@ -54,11 +54,16 @@ public class PackageAnalysisPipeline
     /// one metadata-references.json, one source manifest, one sources/ tree - so when a package
     /// ships several assemblies for the chosen TFM only one of them is analyzed, and
     /// <paramref name="assemblyName"/> says which.
+    ///
+    /// <paramref name="targetFramework"/> pins which lib folder is described. Callers that are
+    /// reconstructing a compilation a specific consumer resolves must set it, since the best TFM
+    /// in the package is frequently not the one that consumer got.
     /// </summary>
     public async Task<PackageExtractionResult?> AnalyzeAsync(
         string packageId,
         string? version,
         string? assemblyName = null,
+        string? targetFramework = null,
         CancellationToken cancellationToken = default)
     {
         var ledger = new ReconstructionLedger();
@@ -93,7 +98,14 @@ public class PackageAnalysisPipeline
         var allAssemblies = _extractionService.FindAssemblies(extractPath);
         DisplayAssembliesTree(allAssemblies, extractPath);
 
-        var (selectedAssemblies, selectedTfm) = _tfmSelector.SelectBestTargetFramework(allAssemblies, extractPath);
+        var (selectedAssemblies, selectedTfm) = _tfmSelector.SelectBestTargetFramework(
+            allAssemblies, extractPath, targetFramework);
+        if (targetFramework != null && selectedAssemblies.Count == 0)
+        {
+            _console.MarkupLine(
+                $"[red]\u2717[/] This package ships no assemblies for [cyan]{targetFramework}[/]");
+            return null;
+        }
         if (selectedTfm != null)
         {
             _console.MarkupLine($"[green]\u2713[/] Selected best TFM: [cyan]{selectedTfm}[/] with [yellow]{selectedAssemblies.Count}[/] assemblies");

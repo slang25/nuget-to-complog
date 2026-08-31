@@ -18,6 +18,7 @@ public class NuGetCommands
     private readonly DiffCommandHandler _diffHandler;
     private readonly ApplyCommandHandler _applyHandler;
     private readonly VerifyCommandHandler _verifyHandler;
+    private readonly SourceBuildCommandHandler _sourceBuildHandler;
     private readonly IConsoleWriter _console;
 
     /// <summary>
@@ -36,6 +37,7 @@ public class NuGetCommands
         DiffCommandHandler diffHandler,
         ApplyCommandHandler applyHandler,
         VerifyCommandHandler verifyHandler,
+        SourceBuildCommandHandler sourceBuildHandler,
         IConsoleWriter console)
     {
         _processHandler = processHandler;
@@ -45,6 +47,7 @@ public class NuGetCommands
         _diffHandler = diffHandler;
         _applyHandler = applyHandler;
         _verifyHandler = verifyHandler;
+        _sourceBuildHandler = sourceBuildHandler;
         _console = console;
     }
 
@@ -144,15 +147,17 @@ public class NuGetCommands
     /// </summary>
     /// <param name="packageId">Optional: apply only patches for this package</param>
     /// <param name="patchesDir">Base directory for patches. Defaults to ./patches/</param>
+    /// <param name="fetchCompiler">Download the exact compiler the package was built with (Microsoft.Net.Compilers.Toolset) when it is not installed locally, so the rebuild differs from the shipped assembly only by your patch.</param>
     [Command("apply")]
     public async Task Apply(
         [Argument] string? packageId = null,
-        string? patchesDir = null)
+        string? patchesDir = null,
+        bool fetchCompiler = false)
     {
         _console.SetIndeterminateProgress();
         try
         {
-            var result = await _applyHandler.HandleAsync(packageId, patchesDir);
+            var result = await _applyHandler.HandleAsync(packageId, patchesDir, fetchCompiler: fetchCompiler);
 
             if (!result)
             {
@@ -167,21 +172,23 @@ public class NuGetCommands
     }
 
     /// <summary>
-    /// Print the bundled agent skill (SKILL.md) that teaches coding agents the swap workflow,
-    /// or install it into an agent's skills directory.
+    /// Print a bundled agent skill (SKILL.md) to stdout, or install the bundled skills into an
+    /// agent's skills directory so it knows these workflows exist.
     /// </summary>
-    /// <param name="install">Install the skill instead of printing it to stdout.</param>
+    /// <param name="install">Install the skills instead of printing one to stdout. Installs all of them unless --name says otherwise.</param>
+    /// <param name="name">Which skill: swap-nuget-dependency (change a dependency) or source-build-nuget-package (build it from source unchanged). Defaults to printing swap-nuget-dependency, and to installing both.</param>
     /// <param name="project">Install to the current directory's project-level skills folder (e.g. ./.claude/skills/) instead of the user-level one.</param>
     /// <param name="agent">Which agent's skills directory to install to: claude, codex, gemini, or agents (the vendor-neutral .agents/skills).</param>
-    /// <param name="force">Overwrite the installed skill even if it has local modifications.</param>
+    /// <param name="force">Overwrite an installed skill even if it has local modifications.</param>
     [Command("skill")]
     public async Task Skill(
         bool install = false,
+        string? name = null,
         bool project = false,
         string agent = "claude",
         bool force = false)
     {
-        var result = await _skillHandler.HandleAsync(install, project, agent, force);
+        var result = await _skillHandler.HandleAsync(install, project, agent, force, name);
         if (!result)
         {
             Environment.ExitCode = 1;
@@ -216,6 +223,40 @@ public class NuGetCommands
                 Environment.ExitCode = 1;
                 return;
             }
+        }
+        finally
+        {
+            _console.ClearProgress();
+        }
+    }
+
+
+    /// <summary>
+    /// Mark a project's PackageReference so its next build uses an assembly compiled from the
+    /// package's own source instead of the one the package shipped. No source code is written
+    /// into the repository - it stays inside a complog in a machine-local cache.
+    /// </summary>
+    /// <param name="packageId">The NuGet package identifier of the PackageReference to mark</param>
+    /// <param name="assets">Build these assets and cache them, instead of marking a project. Each is &lt;packageId&gt;/&lt;version&gt;/&lt;pathInPackage&gt;, separated by semicolons. This is how the MSBuild targets invoke the tool; a build already knows which assets it resolved.</param>
+    /// <param name="project">Path to the project (.csproj) or its directory. Defaults to the single .csproj in the current directory.</param>
+    /// <param name="fetchCompiler">Download the exact compiler (Microsoft.Net.Compilers.Toolset) from nuget.org or the dnceng dotnet-tools feed when it is not installed locally.</param>
+    /// <param name="allowDivergent">Accept a rebuild that is not the same library as the shipped assembly. The substituted assembly is then not known to behave like the one it replaces.</param>
+    /// <param name="skipGenerators">Do not load or run source generator assemblies in this process. Their documents are then passed as plain source files, which cannot reproduce the original PDB exactly.</param>
+    [Command("sourcebuild")]
+    public async Task SourceBuild(
+        [Argument] string? packageId = null,
+        string? assets = null,
+        string? project = null,
+        bool fetchCompiler = false,
+        bool allowDivergent = false,
+        bool skipGenerators = false)
+    {
+        _console.SetIndeterminateProgress();
+        try
+        {
+            Environment.ExitCode = await _sourceBuildHandler.HandleAsync(
+                packageId, assets, project, fetchCompiler, allowDivergent,
+                runGenerators: !SkipGenerators(skipGenerators));
         }
         finally
         {

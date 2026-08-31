@@ -10,7 +10,8 @@ public class TargetFrameworkSelector : ITargetFrameworkSelector
 {
     public (List<string> Assemblies, string? TargetFramework) SelectBestTargetFramework(
         List<string> assemblies,
-        string extractPath)
+        string extractPath,
+        string? requiredTargetFramework = null)
     {
         if (assemblies.Count == 0)
             return (assemblies, null);
@@ -25,6 +26,13 @@ public class TargetFrameworkSelector : ITargetFrameworkSelector
                 return parts.Length > 1 ? parts[1] : "unknown";
             })
             .ToList();
+
+        if (requiredTargetFramework != null)
+        {
+            var required = groupedByTfm.FirstOrDefault(g =>
+                string.Equals(g.Key, requiredTargetFramework, StringComparison.OrdinalIgnoreCase));
+            return (required?.ToList() ?? [], requiredTargetFramework);
+        }
 
         // If only one TFM, return all assemblies
         if (groupedByTfm.Count == 1)

@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <PropertyGroup>
+    <!-- MSBuild.exe (Visual Studio) runs on .NET Framework; `dotnet build` runs on .NET. -->
+    <_NuGetToCompLogTasks Condition="'$(MSBuildRuntimeType)' == 'Core'">$(MSBuildThisFileDirectory)../tasks/netstandard2.0/NuGetToCompLog.SourceBuild.Tasks.dll</_NuGetToCompLogTasks>
+    <_NuGetToCompLogTasks Condition="'$(MSBuildRuntimeType)' != 'Core'">$(MSBuildThisFileDirectory)../tasks/net472/NuGetToCompLog.SourceBuild.Tasks.dll</_NuGetToCompLogTasks>
+
+    <!--
+      The reconstruction tool travels in this package, so nothing has to be installed. It runs out
+      of process: it binds Roslyn, NuGet.Protocol and a decompiler, and MSBuild already has its own
+      copies of the first two loaded.
+    -->
+    <_NuGetToCompLogRunner>$(MSBuildThisFileDirectory)../tools/net10.0/NuGetToCompLog.dll</_NuGetToCompLogRunner>
+    <_NuGetToCompLogHost Condition="'$(DOTNET_HOST_PATH)' != ''">$(DOTNET_HOST_PATH)</_NuGetToCompLogHost>
+    <_NuGetToCompLogHost Condition="'$(_NuGetToCompLogHost)' == ''">dotnet</_NuGetToCompLogHost>
+
+    <!--
+      Building a package from source downloads it, fetches its sources over the network, and runs
+      its source generators in a child process. That is a lot to do on the way to `dotnet build`,
+      so it happens once - when a marked package's assembly is not cached - and says so in the log
+      rather than doing it quietly. Set this to false to require it as an explicit step.
+    -->
+    <NuGetToCompLogAutoBuild Condition="'$(NuGetToCompLogAutoBuild)' == ''">true</NuGetToCompLogAutoBuild>
+
+    <_NuGetToCompLogArgs Condition="'$(NuGetToCompLogFetchCompiler)' == 'true'">$(_NuGetToCompLogArgs) --fetch-compiler</_NuGetToCompLogArgs>
+    <_NuGetToCompLogArgs Condition="'$(NuGetToCompLogAllowDivergent)' == 'true'">$(_NuGetToCompLogArgs) --allow-divergent</_NuGetToCompLogArgs>
+    <_NuGetToCompLogArgs Condition="'$(NuGetToCompLogSkipGenerators)' == 'true'">$(_NuGetToCompLogArgs) --skip-generators</_NuGetToCompLogArgs>
+  </PropertyGroup>
+
+  <UsingTask TaskName="NuGetToCompLog.SourceBuild.ResolveSourceBuiltAssemblies"
+             AssemblyFile="$(_NuGetToCompLogTasks)" />
+
+  <!--
+    Runs after ResolvePackageAssets and before anything reads its output. That is the one place
+    where replacing a file changes every downstream use at once: the compile-time reference, the
+    copy to the output directory, the deps.json entry and the publish set all derive from
+    ResolvedCompileFileDefinitions and RuntimeCopyLocalItems.
+
+    Set NuGetToCompLogDisableSourceBuild=true to build against the published binaries again
+    without unpicking anything.
+  -->
+  <Target Name="NuGetToCompLogSubstituteSourceBuiltAssemblies"
+          AfterTargets="ResolvePackageAssets"
+          Condition="'$(NuGetToCompLogDisableSourceBuild)' != 'true'">
+
+    <!--
+      Ask what is missing before failing on it. On a warm cache this finds nothing and the build
+      carries on; on a cold one it names exactly the assets to build, which the build already knows
+      because it resolved them.
+    -->
+    <ResolveSourceBuiltAssemblies
+        Condition="'$(NuGetToCompLogAutoBuild)' == 'true'"
+        CacheRoot="$(NuGetToCompLogCacheRoot)"
+        CompileItems="@(ResolvedCompileFileDefinitions)"
+        RuntimeItems="@(RuntimeCopyLocalItems)"
+        PackageReferences="@(PackageReference)"
+        SourceBuildPackages="@(SourceBuildPackage)"
+        ReportMissingOnly="true">
+      <Output TaskParameter="AssetsToBuild" ItemName="_NuGetToCompLogToBuild" />
+    </ResolveSourceBuiltAssemblies>
+
+    <Message Importance="high" Condition="'@(_NuGetToCompLogToBuild)' != ''"
+             Text="Building @(_NuGetToCompLogToBuild, ', ') from source (first build only; downloads the package and its sources, and runs its source generators)..." />
+
+    <Exec Condition="'@(_NuGetToCompLogToBuild)' != ''"
+          Command="&quot;$(_NuGetToCompLogHost)&quot; exec &quot;$(_NuGetToCompLogRunner)&quot; sourcebuild --assets &quot;@(_NuGetToCompLogToBuild, ';')&quot;$(_NuGetToCompLogArgs)"
+          WorkingDirectory="$(MSBuildProjectDirectory)"
+          EnvironmentVariables="NUGET_TO_COMPLOG_CACHE=$(NuGetToCompLogCacheRoot)"
+          StandardOutputImportance="high" />
+
+    <ResolveSourceBuiltAssemblies
+        CacheRoot="$(NuGetToCompLogCacheRoot)"
+        CompileItems="@(ResolvedCompileFileDefinitions)"
+        RuntimeItems="@(RuntimeCopyLocalItems)"
+        PackageReferences="@(PackageReference)"
+        SourceBuildPackages="@(SourceBuildPackage)">
+      <Output TaskParameter="CompileItemsToRemove" ItemName="_NuGetToCompLogCompileRemove" />
+      <Output TaskParameter="CompileItemsToAdd" ItemName="_NuGetToCompLogCompileAdd" />
+      <Output TaskParameter="RuntimeItemsToRemove" ItemName="_NuGetToCompLogRuntimeRemove" />
+      <Output TaskParameter="RuntimeItemsToAdd" ItemName="_NuGetToCompLogRuntimeAdd" />
+      <Output TaskParameter="Substitutions" ItemName="_NuGetToCompLogSubstitution" />
+    </ResolveSourceBuiltAssemblies>
+
+    <ItemGroup>
+      <ResolvedCompileFileDefinitions Remove="@(_NuGetToCompLogCompileRemove)" />
+      <ResolvedCompileFileDefinitions Include="@(_NuGetToCompLogCompileAdd)" />
+      <RuntimeCopyLocalItems Remove="@(_NuGetToCompLogRuntimeRemove)" />
+      <RuntimeCopyLocalItems Include="@(_NuGetToCompLogRuntimeAdd)" />
+    </ItemGroup>
+
+    <Message Importance="normal" Condition="'@(_NuGetToCompLogSubstitution)' != ''"
+             Text="Source-built: %(_NuGetToCompLogSubstitution.Identity)" />
+  </Target>
+
+</Project>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <!--
+    Nothing here changes restore. A source build replaces the assembly a resolved package asset
+    points at, after restore has already decided the graph, so the dependency graph - transitive
+    packages included - is exactly the one the project had before.
+  -->
+  <PropertyGroup Condition="'$(NuGetToCompLogCacheRoot)' == ''">
+    <!-- Mirrors Environment.SpecialFolder.LocalApplicationData, where the tool writes. Point
+         NUGET_TO_COMPLOG_CACHE somewhere your CI caches to avoid rebuilding on every run. -->
+    <NuGetToCompLogCacheRoot Condition="'$(NUGET_TO_COMPLOG_CACHE)' != ''">$(NUGET_TO_COMPLOG_CACHE)</NuGetToCompLogCacheRoot>
+    <NuGetToCompLogCacheRoot Condition="'$(NuGetToCompLogCacheRoot)' == '' and '$(OS)' == 'Windows_NT'">$(LOCALAPPDATA)\nuget-to-complog\source-built</NuGetToCompLogCacheRoot>
+    <NuGetToCompLogCacheRoot Condition="'$(NuGetToCompLogCacheRoot)' == '' and $([MSBuild]::IsOSPlatform('OSX'))">$(HOME)/Library/Application Support/nuget-to-complog/source-built</NuGetToCompLogCacheRoot>
+    <NuGetToCompLogCacheRoot Condition="'$(NuGetToCompLogCacheRoot)' == '' and '$(XDG_DATA_HOME)' != ''">$(XDG_DATA_HOME)/nuget-to-complog/source-built</NuGetToCompLogCacheRoot>
+    <NuGetToCompLogCacheRoot Condition="'$(NuGetToCompLogCacheRoot)' == ''">$(HOME)/.local/share/nuget-to-complog/source-built</NuGetToCompLogCacheRoot>
+  </PropertyGroup>
+
+</Project>

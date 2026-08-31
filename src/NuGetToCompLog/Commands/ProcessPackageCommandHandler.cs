@@ -31,7 +31,7 @@ public class ProcessPackageCommandHandler
         {
             DisplayHeader(command.PackageId, command.Version);
 
-            var result = await _pipeline.AnalyzeAsync(command.PackageId, command.Version, command.Assembly, cancellationToken);
+            var result = await _pipeline.AnalyzeAsync(command.PackageId, command.Version, command.Assembly, cancellationToken: cancellationToken);
             if (result == null)
             {
                 return null;

@@ -7,15 +7,32 @@ using NuGetToCompLog.Abstractions;
 namespace NuGetToCompLog.Commands;
 
 /// <summary>
-/// Handles the skill command: prints the bundled agent skill (SKILL.md) to stdout, or installs
-/// it into an agent's skills directory so coding agents discover the swap workflow on their own.
-/// The skill ships embedded in the tool so the installed copy always matches the tool version.
+/// Handles the skill command: prints a bundled agent skill to stdout, or installs the bundled
+/// skills into an agent's skills directory so coding agents discover these workflows on their own.
+///
+/// There is more than one because the workflows have opposite intents - `swap` changes what a
+/// dependency does, a source build keeps it identical - and an agent has to pick between them
+/// before it starts, from the descriptions alone. Merging them into one skill would put that
+/// choice after the decision that matters.
+///
+/// The skills ship embedded in the tool so an installed copy always matches the tool version.
 /// Rendered copies carry a version stamp (so a re-install after a tool update reads as a clean
 /// refresh) and a content checksum (so a hand-edited copy is recognised as modified no matter
 /// which tool version originally installed it).
 /// </summary>
 public partial class SkillCommandHandler
 {
+    /// <summary>
+    /// The bundled skills, by name. Each is embedded under a logical resource name matching its
+    /// directory, so adding one is a csproj line and an entry here.
+    /// </summary>
+    public static readonly IReadOnlyList<string> SkillNames =
+    [
+        "swap-nuget-dependency",
+        "source-build-nuget-package",
+    ];
+
+    /// <summary>The skill printed when none is named, kept for callers that assume one.</summary>
     public const string SkillName = "swap-nuget-dependency";
 
     private const string StampPlaceholder = "dev";
@@ -40,14 +57,19 @@ public partial class SkillCommandHandler
         ["agents"] = ".agents",
     };
 
-    public Task<bool> HandleAsync(bool install, bool project, string agent, bool force)
+    public Task<bool> HandleAsync(bool install, bool project, string agent, bool force, string? name = null)
     {
-        var content = RenderSkill();
+        if (name != null && !SkillNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+        {
+            _console.MarkupLine($"[red]✗[/] Unknown skill '{name}'. Expected one of: {string.Join(", ", SkillNames)}");
+            return Task.FromResult(false);
+        }
 
         if (!install)
         {
-            // Print mode is for piping and inspection: the skill body is the only stdout output.
-            Console.Out.Write(content);
+            // Print mode is for piping and inspection: the skill body is the only stdout output,
+            // so it prints one skill - the named one, or the default.
+            Console.Out.Write(RenderSkill(name ?? SkillName));
             return Task.FromResult(true);
         }
 
@@ -60,7 +82,21 @@ public partial class SkillCommandHandler
         var baseDir = project
             ? Path.Combine(Directory.GetCurrentDirectory(), agentDir, "skills")
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), agentDir, "skills");
-        var skillDir = Path.Combine(baseDir, SkillName);
+
+        // Installing all of them is the default: an agent that has one but not the other will
+        // reach for the one it knows, which is how a source build turns into a patch.
+        var installed = true;
+        foreach (var skill in name != null ? [name] : SkillNames)
+        {
+            installed &= InstallOne(skill, baseDir, force);
+        }
+        return Task.FromResult(installed);
+    }
+
+    private bool InstallOne(string skillName, string baseDir, bool force)
+    {
+        var content = RenderSkill(skillName);
+        var skillDir = Path.Combine(baseDir, skillName);
         var target = Path.Combine(skillDir, "SKILL.md");
 
         var decision = DecideInstall(File.Exists(target) ? File.ReadAllText(target) : null, content, force);
@@ -68,7 +104,7 @@ public partial class SkillCommandHandler
         {
             case InstallDecision.UpToDate:
                 _console.MarkupLine($"[green]✓[/] Skill already up to date at [cyan]{target}[/]");
-                return Task.FromResult(true);
+                return true;
 
             case InstallDecision.Conflict when !Console.IsInputRedirected:
                 Console.Error.Write($"The skill at {target} has local modifications. Overwrite? [y/N] ");
@@ -76,20 +112,20 @@ public partial class SkillCommandHandler
                 if (!string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
                 {
                     _console.MarkupLine("[yellow]Aborted; existing skill left untouched.[/]");
-                    return Task.FromResult(false);
+                    return false;
                 }
                 break;
 
             case InstallDecision.Conflict:
                 _console.MarkupLine($"[red]✗[/] The skill at [cyan]{target}[/] has local modifications. Re-run with [cyan]--force[/] to overwrite.");
-                return Task.FromResult(false);
+                return false;
         }
 
         Directory.CreateDirectory(skillDir);
         File.WriteAllText(target, content);
         _console.MarkupLine($"[green]✓[/] Installed skill to [cyan]{target}[/]");
         _console.MarkupLine($"[dim]   After updating the tool, re-run 'nuget-to-complog skill --install' to refresh it.[/]");
-        return Task.FromResult(true);
+        return true;
     }
 
     public enum InstallDecision
@@ -125,10 +161,10 @@ public partial class SkillCommandHandler
     /// metadata.version, then stamps metadata.checksum with the content's SHA-256 (computed
     /// with the checksum field itself still holding the placeholder).
     /// </summary>
-    public static string RenderSkill()
+    public static string RenderSkill(string skillName = SkillName)
     {
-        using var stream = typeof(SkillCommandHandler).Assembly.GetManifestResourceStream("SKILL.md")
-            ?? throw new InvalidOperationException("Embedded SKILL.md resource not found");
+        using var stream = typeof(SkillCommandHandler).Assembly.GetManifestResourceStream($"{skillName}/SKILL.md")
+            ?? throw new InvalidOperationException($"Embedded skill '{skillName}' not found");
         using var reader = new StreamReader(stream);
         var stamped = StampVersion(reader.ReadToEnd(), ToolVersion());
         return ReplaceInFrontmatter(stamped, ChecksumRegex(), ComputeChecksum(stamped));

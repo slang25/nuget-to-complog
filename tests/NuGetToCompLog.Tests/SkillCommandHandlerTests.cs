@@ -132,3 +132,60 @@ public class SkillCommandHandlerTests
         Assert.True(SkillCommandHandler.VerifyChecksum(rendered));
     }
 }
+
+/// <summary>
+/// The tool bundles more than one skill because the workflows have opposite intents: `swap`
+/// changes what a dependency does, a source build keeps it identical. An agent picks between them
+/// from the descriptions alone, before it starts, so the descriptions have to disagree clearly.
+/// </summary>
+public class BundledSkillsTests
+{
+    public static TheoryData<string> SkillNames() =>
+        [.. SkillCommandHandler.SkillNames];
+
+    [Theory]
+    [MemberData(nameof(SkillNames))]
+    public void EverySkillIsEmbeddedAndRenders(string skillName)
+    {
+        var rendered = SkillCommandHandler.RenderSkill(skillName);
+
+        Assert.StartsWith("---", rendered);
+        Assert.Contains($"name: {skillName}", rendered);
+        Assert.True(SkillCommandHandler.VerifyChecksum(rendered));
+    }
+
+    [Fact]
+    public void RenderSkill_RejectsANameItDoesNotBundle()
+    {
+        Assert.Throws<InvalidOperationException>(() => SkillCommandHandler.RenderSkill("no-such-skill"));
+    }
+
+    [Fact]
+    public void TheSkillsPointAwayFromEachOther()
+    {
+        // Each description has to name the other and say when not to use itself, or an agent
+        // holding both will reach for whichever it read first.
+        var swap = SkillCommandHandler.RenderSkill("swap-nuget-dependency");
+        var sourceBuild = SkillCommandHandler.RenderSkill("source-build-nuget-package");
+
+        Assert.Contains("source-build-nuget-package", Description(swap));
+        Assert.Contains("swap-nuget-dependency", Description(sourceBuild));
+        Assert.Contains("Do NOT", Description(swap));
+        Assert.Contains("Do NOT", Description(sourceBuild));
+    }
+
+    [Fact]
+    public void TheDefaultSkillIsOneOfTheBundledOnes()
+    {
+        Assert.Contains(SkillCommandHandler.SkillName, SkillCommandHandler.SkillNames);
+    }
+
+    private static string Description(string skill)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            skill, "^description: \"(.*?)\"$",
+            System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.Singleline);
+        Assert.True(match.Success, "the skill has no frontmatter description");
+        return match.Groups[1].Value;
+    }
+}

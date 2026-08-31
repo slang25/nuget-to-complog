@@ -26,7 +26,8 @@
     <!-- The agent skill ships inside the tool so `nuget-to-complog skill` can never drift from
          the release; skills/swap-nuget-dependency/SKILL.md stays the canonical repo copy that
          gh skill / npx skills install directly from GitHub. -->
-    <EmbeddedResource Include="../../skills/swap-nuget-dependency/SKILL.md" LogicalName="SKILL.md" />
+    <EmbeddedResource Include="../../skills/swap-nuget-dependency/SKILL.md" LogicalName="swap-nuget-dependency/SKILL.md" />
+    <EmbeddedResource Include="../../skills/source-build-nuget-package/SKILL.md" LogicalName="source-build-nuget-package/SKILL.md" />
   </ItemGroup>
 
   <ItemGroup>
