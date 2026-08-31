@@ -13,7 +13,12 @@ var banner = @"
   [cyan1]╚═╝  ╚═══╝ ╚═════╝ ╚══════╝ ╚═════╝╚══════╝[/]
   [dim]NuGet → CompLog Extractor[/]
 ";
-AnsiConsole.MarkupLine(banner);
+// The skill command's default mode prints SKILL.md to stdout for piping; keep the banner out
+// of that stream.
+if (args is not ["skill", ..])
+{
+    AnsiConsole.MarkupLine(banner);
+}
 
 var services = new ServiceCollection();
 services.AddNuGetToCompLogServices();

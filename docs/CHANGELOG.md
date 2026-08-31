@@ -4,6 +4,17 @@ All notable changes to the NuGet to CompLog tool.
 
 ## [Unreleased]
 
+### Agent skill shipped with the tool (2026-08-28)
+
+- New `skill` command: prints the bundled [Agent Skill](https://agentskills.io) (SKILL.md) that
+  teaches coding agents the `swap` workflow, or installs it with `--install`
+  (`--project`, `--agent claude|codex|gemini|agents`, `--force`)
+- The skill is embedded in the tool and version-stamped on render, so re-running
+  `skill --install` after a tool update refreshes the installed copy; hand-edited copies are
+  never overwritten without `--force`
+- Canonical skill lives at `skills/swap-nuget-dependency/SKILL.md`, installable directly from
+  the repo via `npx skills add` / `gh skill install`
+
 ### Major Refactoring (2025-10-13)
 
 #### Architecture Improvements
