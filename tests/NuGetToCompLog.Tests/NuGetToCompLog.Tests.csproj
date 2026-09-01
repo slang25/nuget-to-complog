@@ -10,6 +10,9 @@
 
   <ItemGroup>
     <PackageReference Include="xunit.v3.mtp-v2" Version="4.0.0" />
+    <!-- The substitution task is loaded by MSBuild in a real build; here it is exercised
+         directly, so the test host supplies the same MSBuild assemblies its host would. -->
+    <PackageReference Include="Microsoft.Build.Utilities.Core" Version="17.14.28" />
   </ItemGroup>
 
   <ItemGroup>
@@ -22,6 +25,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\NuGetToCompLog\NuGetToCompLog.csproj" />
+    <ProjectReference Include="..\..\src\NuGetToCompLog.SourceBuild\NuGetToCompLog.SourceBuild.csproj" />
   </ItemGroup>
 
 </Project>

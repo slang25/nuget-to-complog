@@ -15,7 +15,7 @@ namespace NuGetToCompLog.Services.Swap;
 /// the document would lose the file's lexical details (attribute quoting, entity spellings,
 /// comments, whitespace, line endings) and turn a one-line swap into a whole-file diff.
 /// </summary>
-public static class PackageReferenceSwapper
+public static partial class PackageReferenceSwapper
 {
     /// <summary>
     /// Resolves which project file to operate on. <paramref name="projectOption"/> may name a
@@ -178,6 +178,217 @@ public static class PackageReferenceSwapper
         File.WriteAllText(projectPath, rewritten.ToString(), new UTF8Encoding(hadBom));
         return packageReferences.Count;
     }
+
+    /// <summary>
+    /// Marks every PackageReference for <paramref name="packageId"/> with SourceBuild="true" and
+    /// returns how many items were marked. The metadata is the declaration that a dependency is
+    /// consumed as a source build: it lives in the project file, so it survives, diffs, and is
+    /// reverted like any other line of the build. Everything else - the lock file, the generated
+    /// targets, the cache - is derived from it.
+    ///
+    /// Attributes are spliced in rather than the document re-serialised, for the same reason
+    /// <see cref="Swap"/> does it: a one-attribute change should be a one-attribute diff.
+    /// </summary>
+    public static int MarkSourceBuild(string projectPath, string packageId)
+    {
+        var (text, hadBom) = ReadProject(projectPath);
+        var doc = XDocument.Parse(text, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
+        var packageReferences = FindPackageReferences(doc, packageId);
+        if (packageReferences.Count == 0)
+        {
+            throw new InvalidOperationException($"No PackageReference to {packageId} found in {projectPath}");
+        }
+
+        var lineStarts = LineStarts(text);
+        var spans = packageReferences
+            .Select(e => ElementSpan(text, lineStarts, e))
+            .OrderByDescending(span => span.Start)
+            .ToList();
+
+        var rewritten = new StringBuilder(text);
+        var marked = 0;
+        foreach (var (start, end) in spans)
+        {
+            var element = text[start..end];
+            var existing = SourceBuildAttribute().Match(element, 0, ScanTag(element, 0).End);
+            if (existing.Success)
+            {
+                // SourceBuild="false" is a reference that is *not* consumed as a source build.
+                // Reporting it as already marked would leave the feature off while saying it is on,
+                // so the attribute is rewritten; an already-true one is left exactly as it is.
+                if (IsTrue(existing.Groups[1].Value))
+                {
+                    continue;
+                }
+
+                rewritten.Remove(start + existing.Index, existing.Length)
+                    .Insert(start + existing.Index, " SourceBuild=\"true\"");
+                marked++;
+                continue;
+            }
+
+            var startTag = ScanTag(element, 0);
+            // Insert after the last attribute rather than at the tag end, so the '/>' keeps
+            // whatever spacing it had - including none.
+            var insertAt = startTag.End - (startTag.IsSelfClosing ? 2 : 1);
+            while (insertAt > 0 && char.IsWhiteSpace(element[insertAt - 1]))
+            {
+                insertAt--;
+            }
+
+            rewritten.Insert(start + insertAt, " SourceBuild=\"true\"");
+            marked++;
+        }
+
+        if (marked > 0)
+        {
+            File.WriteAllText(projectPath, rewritten.ToString(), new UTF8Encoding(hadBom));
+        }
+        return marked;
+    }
+
+    /// <summary>
+    /// Removes the SourceBuild marker from every PackageReference for <paramref name="packageId"/>,
+    /// returning how many items changed. Undoing a source build has to be as cheap as asking for
+    /// one, or the honest response to a bad rebuild is to distrust the whole feature.
+    /// </summary>
+    public static int UnmarkSourceBuild(string projectPath, string packageId)
+    {
+        var (text, hadBom) = ReadProject(projectPath);
+        var doc = XDocument.Parse(text, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
+        var packageReferences = FindPackageReferences(doc, packageId);
+
+        var lineStarts = LineStarts(text);
+        var spans = packageReferences
+            .Select(e => ElementSpan(text, lineStarts, e))
+            .OrderByDescending(span => span.Start)
+            .ToList();
+
+        var rewritten = new StringBuilder(text);
+        var unmarked = 0;
+        foreach (var (start, end) in spans)
+        {
+            var element = text[start..end];
+            var match = SourceBuildAttribute().Match(element, 0, ScanTag(element, 0).End);
+            if (!match.Success)
+            {
+                continue;
+            }
+
+            rewritten.Remove(start + match.Index, match.Length);
+            unmarked++;
+        }
+
+        if (unmarked > 0)
+        {
+            File.WriteAllText(projectPath, rewritten.ToString(), new UTF8Encoding(hadBom));
+        }
+        return unmarked;
+    }
+
+    /// <summary>
+    /// Adds a build-only PackageReference to <paramref name="packageId"/> unless the project
+    /// already has one, and returns true when the file changed. The item is placed beside the
+    /// existing PackageReference items so it reads as one of them rather than as machinery
+    /// bolted on at the end.
+    ///
+    /// An existing reference is left exactly as it is, version included: whoever put it there -
+    /// a person, Renovate, a Directory.Build.props - gets to keep deciding.
+    ///
+    /// "Beside" means beside an unconditional one. A multi-targeting project often splits its
+    /// package references by target framework, and landing in one of those groups would import the
+    /// substitution targets for that framework alone - every other one would then build against the
+    /// published binary while the project file says otherwise. When every existing reference is
+    /// conditional, a new unconditional ItemGroup is added instead.
+    /// </summary>
+    public static bool EnsureBuildPackageReference(string projectPath, string packageId, string version)
+    {
+        var (text, hadBom) = ReadProject(projectPath);
+        var doc = XDocument.Parse(text, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
+
+        var packageReferences = doc.Descendants()
+            .Where(e => e.Name.LocalName == "PackageReference")
+            .ToList();
+        if (packageReferences.Any(e =>
+                string.Equals(ReferencedId(e), packageId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        var item = $"<PackageReference Include=\"{packageId}\" Version=\"{version}\" PrivateAssets=\"all\" />";
+        var lineStarts = LineStarts(text);
+        var rewritten = new StringBuilder(text);
+
+        var unconditional = packageReferences.Where(e => !IsConditional(e)).ToList();
+        if (unconditional.Count > 0)
+        {
+            var last = ElementSpan(text, lineStarts, unconditional[^1]);
+            var indent = IndentAt(text, last.Start);
+            var newLine = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+            rewritten.Insert(last.End, $"{newLine}{indent}{item}");
+        }
+        else
+        {
+            var close = text.LastIndexOf("</Project>", StringComparison.Ordinal);
+            if (close < 0)
+            {
+                throw new InvalidOperationException($"No closing </Project> tag in {projectPath}");
+            }
+            var newLine = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+            var insertAt = close;
+            while (insertAt > 0 && char.IsWhiteSpace(text[insertAt - 1]))
+            {
+                insertAt--;
+            }
+            rewritten.Remove(insertAt, close - insertAt)
+                .Insert(insertAt, $"{newLine}{newLine}  <ItemGroup>{newLine}    {item}{newLine}  </ItemGroup>{newLine}");
+        }
+
+        File.WriteAllText(projectPath, rewritten.ToString(), new UTF8Encoding(hadBom));
+        return true;
+    }
+
+    /// <summary>
+    /// True when the item, or anything containing it up to the Project element, carries a
+    /// Condition - so whether it takes part in the build depends on something evaluated later.
+    /// </summary>
+    private static bool IsConditional(XElement element)
+    {
+        for (var current = element; current != null && current.Name.LocalName != "Project"; current = current.Parent)
+        {
+            if (!string.IsNullOrWhiteSpace((string?)current.Attribute("Condition")))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>The whitespace preceding <paramref name="offset"/> on its own line.</summary>
+    private static string IndentAt(string text, int offset)
+    {
+        var lineStart = offset;
+        while (lineStart > 0 && text[lineStart - 1] is not ('\n' or '\r'))
+        {
+            lineStart--;
+        }
+        return text[lineStart..offset].All(char.IsWhiteSpace) ? text[lineStart..offset] : "    ";
+    }
+
+    private static (string Text, bool HadBom) ReadProject(string projectPath)
+    {
+        var bytes = File.ReadAllBytes(projectPath);
+        var hadBom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+        return (Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'), hadBom);
+    }
+
+    private static bool IsTrue(string quotedValue) =>
+        string.Equals(quotedValue.Trim('"', '\''), "true", StringComparison.OrdinalIgnoreCase);
+
+    [System.Text.RegularExpressions.GeneratedRegex(
+        """\s+SourceBuild\s*=\s*("[^"]*"|'[^']*')""",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase)]
+    private static partial System.Text.RegularExpressions.Regex SourceBuildAttribute();
 
     /// <summary>
     /// Offsets of the first character of each line, counting line breaks the way XmlReader does

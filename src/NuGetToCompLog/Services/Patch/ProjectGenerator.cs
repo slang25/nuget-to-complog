@@ -139,7 +139,8 @@ public class ProjectGenerator
         if (metadataReferences.Count == 0)
             return count;
 
-        var acquisitionService = new ReferenceAssemblyAcquisitionService(extraction.WorkingDirectory);
+        var acquisitionService = new ReferenceAssemblyAcquisitionService(
+            extraction.WorkingDirectory, shippedAssemblyPath: extraction.SelectedAssemblies.FirstOrDefault());
         var acquiredReferences = await acquisitionService.AcquireAllReferencesAsync(metadataReferences, extraction.SelectedTfm);
 
         foreach (var (name, path) in acquiredReferences)
@@ -355,6 +356,14 @@ public class ProjectGenerator
         string patchDir,
         string assemblyName)
     {
+        // The compiler and the runtime that hosted it are recorded so a later `apply` can rebuild
+        // on the same pair. Roslyn versions differ in codegen and in the checksums they give
+        // generated documents, so without these the rebuild silently uses whatever this machine
+        // happens to have and cannot match what the package shipped.
+        var (argsDict, _) = extraction.CompilerArgsFile != null
+            ? CompilerArgumentsFile.Parse(await File.ReadAllLinesAsync(extraction.CompilerArgsFile))
+            : (new Dictionary<string, string>(), new List<string>());
+
         var metadata = new
         {
             packageId = extraction.Package.Id,
@@ -362,6 +371,8 @@ public class ProjectGenerator
             targetFramework = extraction.SelectedTfm,
             assemblyName,
             assemblies = extraction.SelectedAssemblies.Select(Path.GetFileName).ToList(),
+            compilerVersion = argsDict.GetValueOrDefault("compiler-version"),
+            runtimeVersion = argsDict.GetValueOrDefault("runtime-version"),
             ejectedAt = DateTime.UtcNow.ToString("o"),
             toolVersion = "1.0.0"
         };

@@ -42,6 +42,12 @@ dotnet run -- verify Serilog 4.4.0
 
 # Swap a consuming project's PackageReference for the package built from source
 dotnet run -- swap Serilog --project path/to/App
+
+# Mark a project's PackageReference as a source build (equivalent to hand-editing the csproj)
+dotnet run -- sourcebuild Serilog --project path/to/App
+
+# Build and cache specific assets - how the MSBuild targets invoke the tool
+dotnet run -- sourcebuild --assets "Serilog/4.0.0/lib/net8.0/Serilog.dll"
 ```
 
 ## Running Tests
@@ -72,6 +78,106 @@ faithful replay. Prefer classifying by *evidence* (does it hash to the recorded 
 the MVID match?) over the code path that produced it. Roll uniform groups into one entry with a
 `Count`; name problems individually. The written file is a golden file — no timestamps, no
 machine paths, stable ordering.
+
+### Source Builds
+
+`sourcebuild` makes a project consume a package as an assembly compiled here rather than the one
+the package shipped, without ejecting source anywhere. Marking a PackageReference
+`SourceBuild="true"` is the entire configuration.
+
+- **`src/NuGetToCompLog.SourceBuild`** is a build-only NuGet package holding the MSBuild logic, so
+  fixing it is a version bump rather than a re-run in every repository. It also carries the tool
+  under `tools/net10.0/` so nothing has to be installed; the targets run it in a **child process**,
+  never as a task, because it binds Roslyn, NuGet.Protocol and a decompiler and MSBuild already has
+  its own copies of the first two loaded.
+- **The build is the source of truth for what to build.** `ResolvePackageAssets` has already
+  decided the version the graph resolved and the exact asset this target framework picked, so the
+  task reads `NuGetPackageId`/`NuGetPackageVersion`/`PathInPackage` off the resolved items and
+  passes them to the tool as `--assets <id>/<version>/<pathInPackage>`. Do not reintroduce a lock
+  file or a project-file probe: both are worse guesses at something the build already knows, and
+  both can disagree with it.
+- **`SourceBuildCache`** keys on `(package id, version, lib TFM)` and stores the assembly, the
+  complog it came from and `<assembly>.provenance.json` together. That layout is the only contract
+  between the tool and the task — `CachedAssemblyContractTests` is what stops the two drifting
+  apart. The record is per *assembly*, not per entry: one package and TFM can ship several
+  (`nunit.framework.dll` beside `nunit.framework.legacy.dll`), a build resolves all of them, and
+  caching the second must not evict the first.
+
+Rules that are easy to break:
+
+1. **Rewrite `HintPath` with the item spec.** `ResolveAssemblyReferences` prefers a reference's
+   `HintPath` over its identity, so an item carrying the package folder's `HintPath` resolves
+   straight back to the published binary — the substitution then appears to work everywhere except
+   the one place that decides what the compiler reads.
+2. **Never fall back silently.** A marker that resolves no assembly, a cached file that fails its
+   recorded hash, and a managed asset no source build covers (a RID-specific assembly under
+   `runtimes/`) are hard errors (`NTCL1001`, `NTCL1002`, `NTCL1003`). Only native and satellite
+   assets are passed over quietly, because neither carries the library's own code. Building
+   against the published binary when a source build was asked for is the failure this feature
+   exists to prevent, and it has no other symptom.
+3. **The substitution must never escape the repository that chose it.** Assets ship under `build/`
+   and never `buildTransitive/`, and the package is a `DevelopmentDependency`. Replacing a
+   dependency's binary is a decision about your own build, not one to make for anyone who consumes
+   your package.
+4. **The props and targets are shipped as-is; nothing else validates them.** An XML comment
+   containing `--` is illegal and produces a package that cannot be imported at all, and `pack`
+   will not notice. `SourceBuildBuildAssetTests` loads both files as XML for exactly this reason.
+5. **The task takes no dependencies.** It is loaded into a host with its own assembly graph, so it
+   reads the one field it needs out of `provenance.json` by hand. Adding a package reference here
+   risks binding against the wrong copy of something at build time.
+
+`SourceBuildCommandHandler.Classify` picks the standard the rebuild is held to, and the choice is
+the subtle part. A byte comparison is only evidence when the exact compiler *and* runtime ran
+(`RebuildOutcome.ToolchainWasExact`); under any other toolchain, differing bytes are the normal
+result of compiling the same source with a different Roslyn and say nothing. There the standard is
+`AssemblySurfaceComparer`: every public type, member and signature, plus every referenced assembly
+identity (name/version/token, deliberately not the MVID — a dependency rebuilt at the same identity
+is not a different dependency). Do not "improve" this by comparing bytes in both regimes; it would
+refuse every source build on a machine that lacks a compiler the dnceng feed has aged out.
+
+`SourceBuildCommandHandler.PassesSourceProvenanceGate` refuses to proceed when the ledger holds a
+`Substituted` entry in the `source` category: source recovered from the shipped assembly is derived
+from the binary, not compiled from source. Substitutions in other categories are fine — a
+public-signing stand-in or an inferred flag changes how the compilation is configured, not where
+its code came from.
+
+### Agent Skills
+
+`skills/` holds the skills the tool ships; `nuget-to-complog skill --install` writes them into an
+agent's skills directory, and they are embedded in the assembly so an installed copy always matches
+the tool version. Adding one is a directory, an `EmbeddedResource` line whose `LogicalName` is
+`<name>/SKILL.md`, and an entry in `SkillCommandHandler.SkillNames`.
+
+There are deliberately two, split on **intent** rather than mechanism: `swap-nuget-dependency`
+changes what a dependency does, `source-build-nuget-package` keeps it identical and compiles it
+locally. They share almost all their machinery, so the temptation is to merge them - don't. Their
+success criteria are inverted (a source build *fails* when the rebuild differs from the shipped
+assembly; a patch *requires* it to differ), and an agent chooses between them from the descriptions
+alone, before it starts. Each description must therefore name the other and say when not to use
+itself; `BundledSkillsTests` enforces that. Changing a description means re-running the eval suites
+under `skills/*/evals/`, since three-way trigger disambiguation is what regresses first.
+
+### Reference Acquisition
+
+A PDB's metadata references carry file names and MVIDs but **no versions**, and a nuspec states a
+range rather than what restore resolved. So when a reference has to be fetched from nuget.org, the
+version comes from the shipped assembly's `AssemblyRef` table
+(`AssemblySurfaceComparer.ReadReferencedAssemblyVersions`) — the only precise record of which build
+of a dependency took part in the compilation.
+
+Two places must keep using it, and both were previously wrong in the same way:
+
+- `AcquireNuGetReferencesAsync` used to fall straight to `GetLatestPackageVersionAsync`. For any
+  package that has been out a while, the newest release is the wrong answer — AutoMapper 13.0.1
+  built against `Microsoft.Extensions.Options 6.0.0` and got 10.0.x.
+- `TryFindExactPackageAssemblyAsync` probes versions by MVID, newest-first, with a bounded window.
+  When the answer is an old release there are far more than `maxProbes` newer versions in front of
+  it, so the probe never reached it. Versions sharing the recorded assembly's major/minor now go
+  first.
+
+Package version and assembly version are not the same thing in general, so both paths treat the
+recorded version as a *guess* and let the MVID check reject it. Do not turn either into an
+assertion.
 
 ### Package Requirements
 

@@ -105,6 +105,13 @@ public record PatchMetadata
     public string? TargetFramework { get; init; }
     public string? AssemblyName { get; init; }
     public List<string> Assemblies { get; init; } = [];
+
+    /// <summary>The Roslyn version the package was compiled with, as its PDB recorded it.</summary>
+    public string? CompilerVersion { get; init; }
+
+    /// <summary>The runtime that hosted that compiler; it lands in the PDB options blob.</summary>
+    public string? RuntimeVersion { get; init; }
+
     public string? EjectedAt { get; init; }
     public string? ToolVersion { get; init; }
 }

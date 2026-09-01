@@ -72,7 +72,7 @@ public class SwapCommandHandler
                 $"[dim]in {Path.GetFileName(projectPath)}[/]",
                 "Green");
 
-            var result = await _pipeline.AnalyzeAsync(packageId, version, assembly, cancellationToken);
+            var result = await _pipeline.AnalyzeAsync(packageId, version, assembly, cancellationToken: cancellationToken);
             if (result == null)
             {
                 _console.MarkupLine("[red]✗[/] Failed to analyze package");

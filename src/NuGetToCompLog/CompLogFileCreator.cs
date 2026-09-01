@@ -140,7 +140,8 @@ public class CompLogFileCreator
             Dictionary<string, string> acquiredReferences = new();
             if (metadataReferences.Count > 0 && !string.IsNullOrEmpty(targetFramework))
             {
-                var acquisitionService = new ReferenceAssemblyAcquisitionService(workingDirectory, ledger);
+                var acquisitionService = new ReferenceAssemblyAcquisitionService(
+                    workingDirectory, ledger, assemblyPath);
                 acquiredReferences = await acquisitionService.AcquireAllReferencesAsync(metadataReferences, targetFramework);
                 
                 if (acquiredReferences.Count == 0)

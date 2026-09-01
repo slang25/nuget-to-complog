@@ -24,10 +24,24 @@ public class ReferenceAssemblyAcquisitionService
     private readonly HashSet<string> _acquiredPackages = [];
     private readonly Dictionary<string, string> _frameworkToPackageMap = new();
     private readonly string _workingDirectory;
+
+    /// <summary>
+    /// The assembly versions the shipped binary was compiled against, by assembly name. A PDB
+    /// records reference file names and MVIDs but no versions, so without this a reference that
+    /// has to be fetched from nuget.org has nothing to say which version it should be - and the
+    /// newest is almost always the wrong answer for a package that is not brand new.
+    /// </summary>
+    private readonly Dictionary<string, Version> _recordedReferenceVersions;
     private readonly ReconstructionLedger? _ledger;
 
-    public ReferenceAssemblyAcquisitionService(string workingDirectory, ReconstructionLedger? ledger = null)
+    public ReferenceAssemblyAcquisitionService(
+        string workingDirectory,
+        ReconstructionLedger? ledger = null,
+        string? shippedAssemblyPath = null)
     {
+        _recordedReferenceVersions = shippedAssemblyPath != null && File.Exists(shippedAssemblyPath)
+            ? Services.SourceBuild.AssemblySurfaceComparer.ReadReferencedAssemblyVersions(shippedAssemblyPath)
+            : [];
         _workingDirectory = workingDirectory;
         _ledger = ledger;
         InitializeFrameworkPackageMap();
@@ -932,6 +946,52 @@ public class ReferenceAssemblyAcquisitionService
         return recovered;
     }
 
+    /// <summary>
+    /// The package version to try for <paramref name="packageId"/>, from the assembly version the
+    /// shipped binary recorded. Returns the published version whose own version matches the
+    /// recorded major/minor/build, which for most libraries is the package that carried it.
+    /// </summary>
+    private async Task<string?> FindPackageVersionForRecordedAssemblyAsync(string packageId)
+    {
+        if (!_recordedReferenceVersions.TryGetValue(packageId, out var recorded))
+        {
+            return null;
+        }
+
+        var candidates = await GetPublishedVersionsAsync(packageId);
+        var match = candidates
+            .Where(v => v.Major == recorded.Major && v.Minor == recorded.Minor)
+            .OrderBy(v => v)
+            .FirstOrDefault(v => v.Patch == recorded.Build)
+            ?? candidates.Where(v => v.Major == recorded.Major && v.Minor == recorded.Minor).OrderBy(v => v).FirstOrDefault();
+
+        if (match != null)
+        {
+            AnsiConsole.MarkupLine(
+                $"    [dim]{packageId}: assembly version {recorded} recorded, using package {match}[/]");
+        }
+        return match?.ToNormalizedString();
+    }
+
+    /// <summary>Non-prerelease versions of a package on nuget.org, newest first.</summary>
+    private async Task<List<NuGetVersion>> GetPublishedVersionsAsync(string packageId)
+    {
+        try
+        {
+            var cache = new SourceCacheContext();
+            var repository = Repository.Factory.GetCoreV3("https://api.nuget.org/v3/index.json");
+            var resource = await repository.GetResourceAsync<FindPackageByIdResource>();
+            return (await resource.GetAllVersionsAsync(packageId, cache, _logger, CancellationToken.None))
+                .Where(v => !v.IsPrerelease)
+                .OrderByDescending(v => v)
+                .ToList();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
     private async Task<string?> TryFindExactPackageAssemblyAsync(
         string packageId,
         string fileName,
@@ -944,11 +1004,22 @@ public class ReferenceAssemblyAcquisitionService
             var cache = new SourceCacheContext();
             var repository = Repository.Factory.GetCoreV3("https://api.nuget.org/v3/index.json");
             var resource = await repository.GetResourceAsync<FindPackageByIdResource>();
-            var versions = (await resource.GetAllVersionsAsync(packageId, cache, _logger, CancellationToken.None))
+            var published = (await resource.GetAllVersionsAsync(packageId, cache, _logger, CancellationToken.None))
                 .Where(v => !v.IsPrerelease)
                 .OrderByDescending(v => v)
-                .Take(maxProbes)
                 .ToList();
+
+            // Probing newest-first finds nothing when the original built against an old release,
+            // which is the normal case for a package that has been out for a while: by the time
+            // Microsoft.Extensions.Options 6.0.0 is the answer there are far more than maxProbes
+            // newer versions in front of it. Versions sharing the recorded assembly's major.minor
+            // go first, so the search starts where the answer actually is.
+            var versions = _recordedReferenceVersions.TryGetValue(
+                    Path.GetFileNameWithoutExtension(fileName), out var recorded)
+                ? published.Where(v => v.Major == recorded.Major && v.Minor == recorded.Minor).OrderBy(v => v)
+                    .Concat(published.Where(v => v.Major != recorded.Major || v.Minor != recorded.Minor))
+                    .Take(maxProbes).ToList()
+                : published.Take(maxProbes).ToList();
 
             foreach (var version in versions)
             {
@@ -1029,7 +1100,12 @@ public class ReferenceAssemblyAcquisitionService
 
             if (string.IsNullOrEmpty(version))
             {
-                version = await GetLatestPackageVersionAsync(packageId);
+                // The assembly version the original compiled against is a far better guess than
+                // the newest release: package and assembly versions track each other for the
+                // Microsoft.Extensions.* family and most libraries, and where they do not the MVID
+                // check downstream rejects the guess and the exact-version probe takes over.
+                version = await FindPackageVersionForRecordedAssemblyAsync(packageId)
+                    ?? await GetLatestPackageVersionAsync(packageId);
                 if (version == null)
                 {
                     AnsiConsole.MarkupLine($"    [yellow]⚠[/] Could not determine version for {packageId}");

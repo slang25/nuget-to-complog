@@ -1,0 +1,84 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net472 for MSBuild.exe (Visual Studio), netstandard2.0 for the .NET MSBuild that
+         `dotnet build` runs. The targets pick between them on $(MSBuildRuntimeType). -->
+    <TargetFrameworks>netstandard2.0;net472</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>NuGetToCompLog.SourceBuild.Tasks</AssemblyName>
+    <RootNamespace>NuGetToCompLog.SourceBuild</RootNamespace>
+
+    <PackageId>NuGetToCompLog.SourceBuild</PackageId>
+    <Version>0.4.0</Version>
+    <Authors>Stuart Lang</Authors>
+    <Description>Build-time support for consuming a NuGet package as a source build: replaces a package's resolved assembly with one compiled locally from the package's own source, leaving restore and the dependency graph untouched. Populate the cache with the nuget-to-complog tool.</Description>
+    <PackageTags>nuget;msbuild;source-build;provenance;reproducible-builds</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/slang25/nuget-to-complog</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/slang25/nuget-to-complog</PackageProjectUrl>
+
+    <!-- A build-only package: no lib/, no dependencies to flow, and nothing for a consumer of a
+         consumer to inherit. The substitution is a private choice about one repository's own
+         binaries, so it must never reach anyone downstream - hence build/ and not
+         buildTransitive/, and DevelopmentDependency so PackageReference defaults to
+         PrivateAssets="all". -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <DevelopmentDependency>true</DevelopmentDependency>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ExcludeAssets=runtime: MSBuild supplies these to the task at run time; shipping copies
+         would risk loading a second, different MSBuild into the build. The version is the
+         compile-time floor the task binds against, so it is also the oldest MSBuild that can
+         load it. -->
+    <PackageReference Include="Microsoft.Build.Framework" Version="17.14.28" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Build.Utilities.Core" Version="17.14.28" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="build/**" Pack="true" PackagePath="build/" />
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!--
+    The package carries the reconstruction tool itself, so a source build needs nothing installed:
+    one PackageReference and `dotnet build` populates the cache on its own.
+
+    It is run out of process rather than loaded as a task. The tool binds Roslyn, NuGet.Protocol
+    and a decompiler, and MSBuild already has its own copies of the first two loaded - a task
+    dragging a second set into the build is the classic way to break it in ways that only show up
+    on someone else's machine. A child process has no such argument with its host.
+  -->
+  <PropertyGroup>
+    <NuGetToCompLogRunnerDir>$(MSBuildProjectDirectory)/obj/runner/</NuGetToCompLogRunnerDir>
+  </PropertyGroup>
+
+  <!-- Invoked rather than ProjectReferenced: a net10.0 tool cannot be referenced by a
+       netstandard2.0 or net472 project, and only its published files are wanted here. -->
+  <Target Name="PublishRunnerIntoPackage" BeforeTargets="_GetPackageFiles">
+    <MSBuild Projects="../NuGetToCompLog/NuGetToCompLog.csproj"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);TargetFramework=net10.0;PublishDir=$(NuGetToCompLogRunnerDir);_IsPublishing=true" />
+    <ItemGroup>
+      <None Include="$(NuGetToCompLogRunnerDir)**/*" Pack="true" PackagePath="tools/net10.0/" />
+    </ItemGroup>
+  </Target>
+
+  <PropertyGroup>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);PackTaskAssembly</TargetsForTfmSpecificContentInPackage>
+  </PropertyGroup>
+
+  <Target Name="PackTaskAssembly">
+    <ItemGroup>
+      <TfmSpecificPackageFile Include="$(TargetPath)" PackagePath="tasks/$(TargetFramework)/" />
+    </ItemGroup>
+  </Target>
+
+</Project>

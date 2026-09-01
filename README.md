@@ -89,18 +89,24 @@ Undo the swap by reverting the consuming project file (`git checkout`); capture 
 committable patch with `nuget-to-complog diff <PackageId>`. See
 [docs/guides/PATCH_PACKAGE.md](./docs/guides/PATCH_PACKAGE.md) for the full patching workflow.
 
-### Teaching your coding agent (agent skill)
+### Teaching your coding agent (agent skills)
 
-The tool bundles an [Agent Skill](https://agentskills.io) that teaches coding agents (Claude
-Code, Codex CLI, Gemini CLI, and others) to use `swap` whenever they need to look inside or
-edit a NuGet dependency — instead of decompiling, cloning the upstream repo, or copying DLLs
-around:
+The tool bundles [Agent Skills](https://agentskills.io) that teach coding agents (Claude Code,
+Codex CLI, Gemini CLI, and others) to reach for these workflows on their own — instead of
+decompiling, cloning the upstream repo, or copying DLLs around. There are two, because they have
+opposite intents and an agent has to choose between them up front:
+
+| | |
+|---|---|
+| `swap-nuget-dependency` | change what a dependency does — debug it, patch it, instrument it |
+| `source-build-nuget-package` | keep it identical, but compile it yourself, for licensing or provenance |
 
 ```bash
-# Print the skill to stdout
+# Print a skill to stdout
 nuget-to-complog skill
+nuget-to-complog skill --name source-build-nuget-package
 
-# Install it for Claude Code (user-level, ~/.claude/skills/)
+# Install them for Claude Code (user-level, ~/.claude/skills/)
 nuget-to-complog skill --install
 
 # Or project-level / other agents
@@ -108,11 +114,147 @@ nuget-to-complog skill --install --project
 nuget-to-complog skill --install --agent codex   # claude | codex | gemini | agents
 ```
 
-The installed skill is stamped with the tool version; after `dotnet tool update -g
-nugettocomplog`, re-run `nuget-to-complog skill --install` to refresh it. The canonical copy
-lives at [skills/swap-nuget-dependency](./skills/swap-nuget-dependency/SKILL.md), so
-`npx skills add slang25/nuget-to-complog` and `gh skill install slang25/nuget-to-complog`
-work too.
+Installed skills are stamped with the tool version; after `dotnet tool update -g nugettocomplog`,
+re-run `nuget-to-complog skill --install` to refresh them. The canonical copies live under
+[skills/](./skills/), so `npx skills add slang25/nuget-to-complog` and
+`gh skill install slang25/nuget-to-complog` work too.
+
+
+### Consuming a package as a source build
+
+Two lines in the project file, and nothing to install:
+
+```xml
+<PackageReference Include="NuGetToCompLog.SourceBuild" Version="0.4.0" PrivateAssets="all" />
+<PackageReference Include="Serilog" Version="4.0.0" SourceBuild="true" />
+```
+
+`dotnet build` now compiles against an assembly built on this machine from Serilog's own source.
+The first build reconstructs and caches it; later builds use the cache. There is no lock file, no
+generated targets and no separate step: the marker is the whole configuration, and everything else
+the substitution needs — the version the graph resolved, the lib folder this target framework
+picked, the assembly name — the build already knows and passes through.
+
+For a package reached only transitively, there is no `PackageReference` to mark, so name it
+directly:
+
+```xml
+<SourceBuildPackage Include="Serilog" />
+```
+
+`nuget-to-complog sourcebuild <PackageId>` will write the marker for you if you would rather not
+hand-edit, but it is only editing the project file.
+
+This is `swap`'s opposite number: it ejects nothing. The package is reconstructed, compiled with
+the exact compiler its PDB records where that is installed, checked against the binary the package
+shipped, and cached; the source stays sealed inside the complog next to the cached assembly.
+Restore is untouched, so the dependency graph — transitive packages included — resolves exactly as
+before, and `deps.json` still describes the package as it always did. Only the assembly the
+compiler reads and the output directory receives is different.
+
+Useful where a package licenses its compiled binary on different terms from its source, where
+policy says dependencies must be built in-house, or where you just want evidence that a published
+binary matches the source it claims to come from. Nothing about the dependency graph changes, so a
+source-built package's own dependencies keep resolving as published packages.
+
+**It stays private to your repository.** The build package ships its assets under `build/`, not
+`buildTransitive/`, and is a `DevelopmentDependency`. If you pack a library that source-builds one
+of its dependencies, nothing about that reaches the people who consume your package — their build
+resolves the published binary as usual, and neither the substitution nor the build package appears
+in your nuspec. Replacing a dependency's binary is a decision about your own build; it is not one
+you get to make for anybody downstream.
+
+To build against the published binaries again without unpicking anything:
+
+```bash
+dotnet build -p:NuGetToCompLogDisableSourceBuild=true
+```
+
+#### Building a package from source is not a quiet operation
+
+The first build after a clone downloads the package, fetches its sources over the network, and
+runs its source generators in a child process. That happens once, only for a marked package whose
+assembly is not already cached, and it announces itself in the build log rather than happening
+silently. `-p:NuGetToCompLogAutoBuild=false` turns the automatic path off and makes a missing
+assembly an error instead.
+
+Point `NUGET_TO_COMPLOG_CACHE` at a directory your CI caches, next to where it caches
+`~/.nuget/packages`, and the cost is paid once rather than per run. Parallel builds of a solution
+that all reach a cold cache are safe: the cache is locked per entry, and whoever waits picks up the
+assembly the first one built.
+
+Properties that shape the build: `NuGetToCompLogFetchCompiler` downloads the exact compiler the
+package used, `NuGetToCompLogSkipGenerators` keeps package-authored generator code out of the
+process, and `NuGetToCompLogAllowDivergent` accepts a rebuild that is not the same library.
+
+#### How it decides the rebuild is the same library
+
+You do not need the compiler the package was built with — your SDK's compiler is fine, which is
+what building a library from its repository yourself would use anyway. But that changes what
+counts as evidence, so the check changes with it:
+
+**When the exact compiler and runtime ran** (they are installed, or `--fetch-compiler` fetched
+them), the bytes are authoritative and are compared directly:
+
+| | |
+|---|---|
+| `Identical` | byte-for-byte |
+| `ContentEquivalent` | every content byte matches; only fields derived from the signing key and PDB differ |
+
+For a signed package `Identical` is unreachable — the Authenticode signature covers bytes only the
+publisher's key can produce — so `ContentEquivalent` is the realistic pass, not a near miss. If the
+bytes still differ beyond that, the toolchain was right and the inputs were not, so it is refused.
+
+**Otherwise the bytes mean nothing.** Two Roslyn versions compiling identical source differ as a
+matter of course, so "the bytes differ" cannot tell a harmless codegen change from a rebuild that
+dropped a type. What survives the toolchain is what a consumer can actually observe, so that is
+what gets compared:
+
+| | |
+|---|---|
+| `ApiEquivalent` | every public type, member and signature matches the shipped assembly, and so does every referenced assembly identity |
+
+That second half matters as much as the first. A rebuild whose own surface is untouched but which
+binds to `Microsoft.Extensions.Options 10.0.0.0` where the original bound to `6.0.0.0` is not the
+same library, and is refused. Differing MVIDs at the *same* identity are fine — that is one
+dependency rebuilt, not a different dependency.
+
+It is not a proof of identical behaviour; two assemblies can share a surface and differ inside. It
+is the strongest compiler-independent evidence available, and it is checked alongside the
+reconstruction ledger, which separately accounts for every input that went into the compilation.
+
+#### What it refuses to do
+
+- **Source recovered from the shipped assembly.** If the ledger had to decompile a document,
+  the result is derived from the binary rather than compiled from source, and it is not the
+  independently compiled binary the licence carves out. Inferred compiler *flags* are fine —
+  they change how the compilation is configured, not where its code came from.
+- **A rebuild that is not the same library**, by whichever standard applies above.
+  `--allow-divergent` accepts it deliberately; the provenance record then says so.
+- **A marker that resolves nothing.** A package named for source building that contributes no
+  assembly — a typo, or an analyzer-only package — fails the build with `NTCL1001`. So does a
+  cached assembly that no longer matches what was recorded for it (`NTCL1002`), and an asset a
+  source build cannot cover, such as a RID-specific managed assembly under `runtimes/`
+  (`NTCL1003`) — compiling against the source build and then running against the vendor binary is
+  no better than not substituting at all. Quietly building against the published binary when a
+  source build was asked for is the one outcome this feature cannot have.
+
+`Serilog.dll.provenance.json`, written beside the cached assembly it describes (one per assembly,
+since a package can ship several for one target framework), records which standard was met and on
+what:
+
+```json
+{
+  "packageId": "Serilog",
+  "packageVersion": "4.0.0",
+  "equivalence": "ApiEquivalent",
+  "compiler": "4.14.0-3.25465.8",
+  "compilerWasExact": false,
+  "runtimeWasExact": false,
+  "surfaceMembersChecked": 580,
+  "reconstructionOutlook": "unconfirmed"
+}
+```
 
 ### Packages that ship more than one assembly
 

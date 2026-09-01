@@ -1,17 +1,27 @@
-using System.Diagnostics;
+using System.Text.Json;
 using NuGetToCompLog.Abstractions;
+using NuGetToCompLog.Services.SourceBuild;
 
 namespace NuGetToCompLog.Services.Patch;
 
 /// <summary>
 /// Rebuilds an assembly from patched source files using the compiler response file.
+///
+/// The compiler is chosen the same way every other rebuild in this tool chooses one: the exact
+/// Roslyn the package's PDB recorded, on the runtime that hosted it, falling back to what is
+/// installed. A patched rebuild is the original compilation with a few source bytes changed, so
+/// everything else about it should still be the original compilation - otherwise a patch that
+/// changes nothing produces a different assembly, and there is no way to tell that apart from a
+/// patch that changed something.
 /// </summary>
 public class AssemblyRebuilder
 {
+    private readonly CscInvoker _csc;
     private readonly IConsoleWriter _console;
 
-    public AssemblyRebuilder(IConsoleWriter console)
+    public AssemblyRebuilder(CscInvoker csc, IConsoleWriter console)
     {
+        _csc = csc;
         _console = console;
     }
 
@@ -22,6 +32,7 @@ public class AssemblyRebuilder
     public async Task<RebuildResult> RebuildAsync(
         string patchDir,
         string? patchedSourceDir = null,
+        bool fetchCompiler = false,
         CancellationToken cancellationToken = default)
     {
         var rspPath = Path.Combine(patchDir, "build.rsp");
@@ -41,61 +52,62 @@ public class AssemblyRebuilder
         var binDir = Path.Combine(patchDir, "bin");
         Directory.CreateDirectory(binDir);
 
-        // Find dotnet executable or command name to launch
-        var dotnetPath = FindDotnet();
-
-        // Find csc.dll
-        var cscPath = FindCscDll();
-        if (cscPath == null)
+        var (compilerVersion, runtimeVersion) = ReadRecordedToolchain(patchDir);
+        var compiler = await _csc.SelectAsync(compilerVersion, runtimeVersion, fetchCompiler, cancellationToken);
+        if (compiler == null)
         {
-            return new RebuildResult(false, "Could not find csc.dll in .NET SDK", null);
+            return new RebuildResult(false, "Could not find csc.dll in any installed .NET SDK", null);
+        }
+
+        if (compilerVersion != null && !compiler.CompilerWasExact)
+        {
+            _console.MarkupLine($"[yellow]⚠[/] Rebuilding with this machine's compiler, not the " +
+                                $"{compilerVersion.Split('+')[0]} the package used - the result will differ from " +
+                                "the shipped assembly beyond your patch");
         }
 
         var rspRelative = Path.GetRelativePath(patchDir, effectiveRspPath);
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = dotnetPath,
-            WorkingDirectory = patchDir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        startInfo.ArgumentList.Add("exec");
-        startInfo.ArgumentList.Add(cscPath);
-        startInfo.ArgumentList.Add($"@{rspRelative}");
-
         _console.MarkupLine($"[dim]Running: dotnet exec {{csc}} @{rspRelative}[/]");
         _console.MarkupLine($"[dim]Working directory: {patchDir}[/]");
 
         try
         {
-            using var process = Process.Start(startInfo);
-            if (process == null)
+            var (exitCode, output) = await CscInvoker.RunAsync(compiler, patchDir, rspRelative, cancellationToken);
+            if (exitCode != 0)
             {
-                return new RebuildResult(false, "Failed to start compiler process", null);
+                return new RebuildResult(false, output.Trim(), null);
             }
 
-            var stdout = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-            var stderr = await process.StandardError.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken);
-
-            var output = (stdout + "\n" + stderr).Trim();
-
-            if (process.ExitCode == 0)
-            {
-                // Find the output assembly
-                var outputDll = Directory.GetFiles(binDir, "*.dll").FirstOrDefault();
-                return new RebuildResult(true, output, outputDll);
-            }
-            else
-            {
-                return new RebuildResult(false, output, null);
-            }
+            var outputDll = Directory.GetFiles(binDir, "*.dll").FirstOrDefault();
+            return new RebuildResult(true, output.Trim(), outputDll);
         }
         catch (Exception ex)
         {
             return new RebuildResult(false, $"Compiler execution failed: {ex.Message}", null);
+        }
+    }
+
+    /// <summary>
+    /// Reads the compiler and runtime the eject recorded. Directories ejected before those were
+    /// written simply have neither, and fall back to whatever is installed.
+    /// </summary>
+    private static (string? Compiler, string? Runtime) ReadRecordedToolchain(string patchDir)
+    {
+        var path = Path.Combine(patchDir, "patch-metadata.json");
+        if (!File.Exists(path))
+        {
+            return (null, null);
+        }
+
+        try
+        {
+            var metadata = JsonSerializer.Deserialize<PatchMetadata>(
+                File.ReadAllText(path), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            return (metadata?.CompilerVersion, metadata?.RuntimeVersion);
+        }
+        catch (JsonException)
+        {
+            return (null, null);
         }
     }
 
@@ -148,71 +160,8 @@ public class AssemblyRebuilder
         return true;
     }
 
-    private static string FindDotnet()
-    {
-        var exeName = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
 
-        var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
-        if (dotnetRoot != null)
-        {
-            var dotnetExe = Path.Combine(dotnetRoot, exeName);
-            if (File.Exists(dotnetExe))
-                return dotnetExe;
-        }
 
-        // Try common locations
-        if (!OperatingSystem.IsWindows())
-        {
-            var candidates = new[]
-            {
-                "/usr/local/share/dotnet/dotnet",
-                "/usr/share/dotnet/dotnet",
-                "/opt/homebrew/bin/dotnet"
-            };
-
-            foreach (var candidate in candidates)
-            {
-                if (File.Exists(candidate))
-                    return candidate;
-            }
-        }
-
-        // Fall back to PATH
-        return "dotnet";
-    }
-
-    private static string? FindCscDll()
-    {
-        var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT")
-            ?? (OperatingSystem.IsWindows()
-                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet")
-                : "/usr/local/share/dotnet");
-
-        var sdkPath = Path.Combine(dotnetRoot, "sdk");
-        if (!Directory.Exists(sdkPath))
-            return null;
-
-        var latestSdk = Directory.GetDirectories(sdkPath)
-            .Select(d => (Path: d, Version: ParseVersion(Path.GetFileName(d))))
-            .Where(x => x.Version != null)
-            .OrderByDescending(x => x.Version)
-            .Select(x => x.Path)
-            .FirstOrDefault();
-
-        if (latestSdk == null)
-            return null;
-
-        var cscPath = Path.Combine(latestSdk, "Roslyn", "bincore", "csc.dll");
-        return File.Exists(cscPath) ? cscPath : null;
-    }
-
-    private static Version? ParseVersion(string name)
-    {
-        // SDK directory names like "10.0.100" or "9.0.200-preview.1"
-        var dashIndex = name.IndexOf('-');
-        var versionPart = dashIndex >= 0 ? name[..dashIndex] : name;
-        return Version.TryParse(versionPart, out var v) ? v : null;
-    }
 }
 
 public record RebuildResult(bool Success, string Output, string? OutputAssemblyPath);

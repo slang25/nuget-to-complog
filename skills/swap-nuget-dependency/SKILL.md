@@ -1,6 +1,6 @@
 ---
 name: swap-nuget-dependency
-description: "Swap a .NET project's PackageReference for the same NuGet package built from its recovered source, in one command — the dependency becomes editable C# that plain `dotnet build` compiles. Use this whenever you want to look inside or change the behavior of a NuGet dependency of a project you're working on: validating a suspicion about what a library actually does, adding a log line or instrumentation inside a package, reproducing or fixing a suspected bug in a dependency, or preparing a patch to submit upstream. Reach for this instead of decompiling, cloning the library's GitHub repo, or manually copying patched DLLs — it is faster, more reliable, and far cheaper in tokens. Prefer this skill over patch-nuget-package when the goal is to edit a dependency in the context of a consuming project or solution; use patch-nuget-package only when you need a byte-exact standalone rebuild. Requires the nuget-to-complog tool."
+description: "Change what a NuGet dependency does, by recovering its original source and building it. `nuget-to-complog swap` replaces a project's PackageReference with a ProjectReference to that source in one command, so the dependency becomes editable C# that plain `dotnet build` compiles. Use this whenever you need to look inside or modify a dependency: validating a suspicion about what a library actually does, adding a log line or instrumentation inside a package, fixing a bug or applying a security hotfix you can't wait upstream for, changing a default, monkey-patching a library, working around a NuGet bug, or preparing a patch to submit upstream. Covers the standalone case too, where there is no consuming project to swap. Reach for this instead of decompiling, cloning the library's GitHub repo, or copying patched DLLs around — it is faster, more reliable, and far cheaper in tokens. Do NOT use it to build a dependency from source *without* changing it, for licensing or provenance reasons — that is source-build-nuget-package. Requires the nuget-to-complog tool."
 metadata:
   version: dev
   checksum: dev
@@ -84,9 +84,33 @@ git checkout -- <path-to>/<Project>.csproj
 rm -rf patches/<PackageId>+<Version>
 ```
 
+## No consuming project? Eject instead
+
+`swap` needs a project whose `PackageReference` it can rewrite. When there isn't one — you just
+want a patched DLL, or you're preparing a change with nothing to test it in — use the standalone
+path, which produces the same recovered source without touching any project:
+
+```bash
+nuget-to-complog eject <PackageId> [Version]     # recover source into patches/<PackageId>+<Version>/
+# edit patches/<PackageId>+<Version>/src/
+nuget-to-complog diff <PackageId>                # capture the edit as a .patch
+nuget-to-complog apply <PackageId> --fetch-compiler
+```
+
+`apply` rebuilds through the original compiler response file rather than a generated `.csproj`, so
+it stays closer to the original compilation than `swap` does — `--fetch-compiler` downloads the
+exact Roslyn the package was built with when it isn't installed, leaving your patch as the only
+intended difference from the shipped assembly. The rebuilt DLL lands in
+`patches/<PackageId>+<Version>/bin/`.
+
+Two things to watch on this path: a new `.cs` file has to be added to `build.rsp` by hand (the
+response file lists sources explicitly), and getting the DLL into an app means copying it over the
+one in `bin/` and running with `--no-build` so the next build doesn't overwrite it. That copying is
+exactly what `swap` exists to avoid, so prefer `swap` whenever a consuming project exists.
+
 ## Things to know
 
-- **The generated project approximates the original compilation.** It carries over language version, defines, optimization, nullable, and unsafe settings from the PDB, but it is not byte-exact. That's fine — for editing and validating, editable and incremental is the point. If you need a byte-for-byte rebuild, that path is `build.rsp` + `nuget-to-complog apply` (see docs/guides/PATCH_PACKAGE.md in the nuget-to-complog repo).
+- **The generated project approximates the original compilation.** It carries over language version, defines, optimization, nullable, and unsafe settings from the PDB, but it is not byte-exact. That's fine — for editing and validating, editable and incremental is the point. If you need a rebuild that stays closer to the original compilation, that path is `eject` + `apply --fetch-compiler` above.
 - **Strong naming keeps working.** Strong-named packages are public-signed with the original key, so assembly identity and `InternalsVisibleTo` friendships survive the swap.
 - **Your repo's build config won't leak in.** The patch directory gets stub `Directory.Build.props` / `Directory.Build.targets` / `Directory.Packages.props`, so the consuming repo's central package management, analyzers, and custom targets don't apply to the reconstructed project.
 - **A few files may be decompiled stand-ins.** Recovery works through SourceLink; when a document can't be fetched, the tool decompiles it from the shipped assembly instead and says so in the swap output (`Decompiled N missing file(s)`). Stand-ins build and test fine, but they are not the author's text — if your edit lands in one, don't present that hunk upstream as authored source; locate the corresponding file in the upstream repo first.

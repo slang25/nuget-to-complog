@@ -28,6 +28,7 @@ public class ApplyCommandHandler
     public async Task<bool> HandleAsync(
         string? packageId = null,
         string? patchesDir = null,
+        bool fetchCompiler = false,
         CancellationToken cancellationToken = default)
     {
         try
@@ -67,10 +68,10 @@ public class ApplyCommandHandler
                 }
 
                 // Build directly from ejected source (no patch file needed)
-                return await BuildFromEjectedSourcesAsync(ejectedDirs, cancellationToken);
+                return await BuildFromEjectedSourcesAsync(ejectedDirs, fetchCompiler, cancellationToken);
             }
 
-            return await ApplyPatchFilesAsync(patchFiles, cancellationToken);
+            return await ApplyPatchFilesAsync(patchFiles, fetchCompiler, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -79,7 +80,8 @@ public class ApplyCommandHandler
         }
     }
 
-    private async Task<bool> BuildFromEjectedSourcesAsync(List<string> ejectedDirs, CancellationToken cancellationToken)
+    private async Task<bool> BuildFromEjectedSourcesAsync(
+        List<string> ejectedDirs, bool fetchCompiler, CancellationToken cancellationToken)
     {
         var allSuccess = true;
 
@@ -95,7 +97,7 @@ public class ApplyCommandHandler
             _console.MarkupLine($"\n[cyan]\u2192[/] Building [yellow]{metadata.PackageId} {metadata.Version}[/] from ejected source...");
 
             // Build directly using the src/ directory (which the user has edited)
-            var result = await _rebuilder.RebuildAsync(patchDir, cancellationToken: cancellationToken);
+            var result = await _rebuilder.RebuildAsync(patchDir, fetchCompiler: fetchCompiler, cancellationToken: cancellationToken);
 
             if (result.Success)
             {
@@ -119,7 +121,8 @@ public class ApplyCommandHandler
         return allSuccess;
     }
 
-    private async Task<bool> ApplyPatchFilesAsync(List<string> patchFiles, CancellationToken cancellationToken)
+    private async Task<bool> ApplyPatchFilesAsync(
+        List<string> patchFiles, bool fetchCompiler, CancellationToken cancellationToken)
     {
         var allSuccess = true;
 
@@ -180,7 +183,7 @@ public class ApplyCommandHandler
             CopyUnpatchedFiles(originalDir, patchedDir, applyResult.DeletedFiles);
 
             // Rebuild with patched sources
-            var rebuildResult = await _rebuilder.RebuildAsync(patchDir, patchedDir, cancellationToken);
+            var rebuildResult = await _rebuilder.RebuildAsync(patchDir, patchedDir, fetchCompiler, cancellationToken);
 
             if (rebuildResult.Success)
             {

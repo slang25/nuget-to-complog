@@ -132,3 +132,105 @@ public class SkillCommandHandlerTests
         Assert.True(SkillCommandHandler.VerifyChecksum(rendered));
     }
 }
+
+/// <summary>
+/// The tool bundles more than one skill because the workflows have opposite intents: `swap`
+/// changes what a dependency does, a source build keeps it identical. An agent picks between them
+/// from the descriptions alone, before it starts, so the descriptions have to disagree clearly.
+/// </summary>
+public class BundledSkillsTests
+{
+    public static TheoryData<string> SkillNames() =>
+        [.. SkillCommandHandler.SkillNames];
+
+    [Theory]
+    [MemberData(nameof(SkillNames))]
+    public void EverySkillIsEmbeddedAndRenders(string skillName)
+    {
+        var rendered = SkillCommandHandler.RenderSkill(skillName);
+
+        Assert.StartsWith("---", rendered);
+        Assert.Contains($"name: {skillName}", rendered);
+        Assert.True(SkillCommandHandler.VerifyChecksum(rendered));
+    }
+
+    [Fact]
+    public void RenderSkill_RejectsANameItDoesNotBundle()
+    {
+        Assert.Throws<InvalidOperationException>(() => SkillCommandHandler.RenderSkill("no-such-skill"));
+    }
+
+    [Fact]
+    public void TheSkillsPointAwayFromEachOther()
+    {
+        // Each description has to name the other and say when not to use itself, or an agent
+        // holding both will reach for whichever it read first.
+        var swap = SkillCommandHandler.RenderSkill("swap-nuget-dependency");
+        var sourceBuild = SkillCommandHandler.RenderSkill("source-build-nuget-package");
+
+        Assert.Contains("source-build-nuget-package", Description(swap));
+        Assert.Contains("swap-nuget-dependency", Description(sourceBuild));
+        Assert.Contains("Do NOT", Description(swap));
+        Assert.Contains("Do NOT", Description(sourceBuild));
+    }
+
+    [Fact]
+    public async Task ANameIsAcceptedInAnyCaseAndUsedInTheCanonicalOne()
+    {
+        // The name goes on to address a manifest resource and an install directory, and both are
+        // case-sensitive; accepting a name loosely and then using it verbatim throws instead.
+        var output = new StringWriter();
+        var original = Console.Out;
+        Console.SetOut(output);
+        try
+        {
+            var handler = new SkillCommandHandler(new SilentConsole());
+
+            Assert.True(await handler.HandleAsync(
+                install: false, project: false, agent: "claude", force: false, name: "SWAP-NuGet-Dependency"));
+        }
+        finally
+        {
+            Console.SetOut(original);
+        }
+
+        Assert.Contains("name: swap-nuget-dependency", output.ToString());
+    }
+
+    [Fact]
+    public async Task ANameThatIsNotBundledIsRefusedRatherThanRendered()
+    {
+        var handler = new SkillCommandHandler(new SilentConsole());
+
+        Assert.False(await handler.HandleAsync(
+            install: false, project: false, agent: "claude", force: false, name: "no-such-skill"));
+    }
+
+    private sealed class SilentConsole : NuGetToCompLog.Abstractions.IConsoleWriter
+    {
+        public void MarkupLine(string markup) { }
+        public void WriteLine() { }
+        public void WriteException(Exception exception) { }
+        public void WritePanel(string header, string content, string? borderColor = null) { }
+        public void WriteTree(string rootLabel, Dictionary<string, List<string>> nodes) { }
+        public void WriteTable(string[] headers, List<string[]> rows) { }
+        public Task ExecuteWithStatusAsync(string status, Func<Task> action) => action();
+        public void SetIndeterminateProgress() { }
+        public void ClearProgress() { }
+    }
+
+    [Fact]
+    public void TheDefaultSkillIsOneOfTheBundledOnes()
+    {
+        Assert.Contains(SkillCommandHandler.SkillName, SkillCommandHandler.SkillNames);
+    }
+
+    private static string Description(string skill)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            skill, "^description: \"(.*?)\"$",
+            System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.Singleline);
+        Assert.True(match.Success, "the skill has no frontmatter description");
+        return match.Groups[1].Value;
+    }
+}
