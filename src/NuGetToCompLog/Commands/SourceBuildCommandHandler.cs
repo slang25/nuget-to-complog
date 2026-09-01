@@ -16,11 +16,10 @@ namespace NuGetToCompLog.Commands;
 ///
 /// This is deliberately not <c>swap</c>. Swap ejects readable source into the repository so it can
 /// be edited; this ejects nothing. The source exists only inside a complog in a machine-local
-/// cache, and what the build consumes is the compiled result - which is the shape the Open Source
-/// Maintenance Fee model asks for, where the source is freely licensed and the published binary
-/// is the thing being paid for. Building it yourself is the alternative the licence names, so the
-/// artifact has to be genuinely self-compiled: the ledger gate below refuses to proceed on source
-/// that was recovered from the binary rather than from the project's own sources.
+/// cache, and what the build consumes is the compiled result. The point is a library that is
+/// unchanged but compiled here, so the artifact has to be genuinely self-compiled: the ledger gate
+/// below refuses to proceed on source that was recovered from the binary rather than from the
+/// project's own sources.
 ///
 /// Which assemblies to build is not decided here. A build knows the package id, the version its
 /// graph resolved and the exact asset it picked out of the package, so the MSBuild targets pass

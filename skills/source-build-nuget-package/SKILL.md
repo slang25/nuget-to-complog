@@ -1,6 +1,6 @@
 ---
 name: source-build-nuget-package
-description: "Make a .NET project build and ship a NuGet dependency from that package's own source instead of the binary the package published, without changing what the library does and without putting its source in the repository. Use this when the reason is licensing or provenance rather than behaviour: an Open Source Maintenance Fee (OSMF) package whose binary is licensed but whose source is not, a policy that dependencies must be compiled in-house, wanting to verify a published binary really matches its source, or simply not wanting to ship a vendor's compiled artifact. Trigger on \"maintenance fee\", \"OSMF\", \"licensed binary\", \"compile the dependency myself\", \"build this package from source\", \"don't ship the vendor's binary\". Do NOT use this to change, patch, instrument or debug a dependency — that is swap-nuget-dependency, which is the opposite intent and has the opposite success criteria."
+description: "Make a .NET project build and ship a NuGet dependency from that package's own source instead of the binary the package published, without changing what the library does and without putting its source in the repository. Use this when the reason is licensing or provenance rather than behaviour: a package whose binary is licensed on different terms from its source, a policy that dependencies must be compiled in-house, wanting evidence that a published binary really matches its source, or simply not wanting to ship a vendor's compiled artifact. Trigger on \"build this package from source\", \"compile the dependency myself\", \"licensed binary\", \"don't ship the vendor's binary\", \"verify the binary matches the source\", \"build our dependencies in-house\". Do NOT use this to change, patch, instrument or debug a dependency — that is swap-nuget-dependency, which is the opposite intent and has the opposite success criteria."
 metadata:
   version: dev
   checksum: dev
@@ -20,12 +20,12 @@ do. If the goal is to change behaviour, stop and use `swap-nuget-dependency` ins
 
 ## Why this exists
 
-The [Open Source Maintenance Fee](https://opensourcemaintenancefee.org) licenses the *published
-binary* while the source stays under its OSI licence, and the agreement explicitly names
-self-compilation as the alternative: *"User may independently compile binaries from the Software's
-source code without this Agreement."* A source build is that alternative, automated. It is also
-useful anywhere a policy says dependencies must be built in-house, or where you want evidence that
-a published binary matches its source.
+Some packages license the compiled binary on different terms from the source, and building the
+library yourself is the stated alternative. Others sit under a policy that dependencies must be
+compiled in-house. And sometimes the point is simply evidence: a source build that reproduces the
+published assembly is proof the binary matches the source it claims to come from.
+
+All three want the same thing — the library, unchanged, from a compiler you ran.
 
 ## Prerequisites
 

@@ -14,7 +14,7 @@
     <Version>0.4.0</Version>
     <Authors>Stuart Lang</Authors>
     <Description>Build-time support for consuming a NuGet package as a source build: replaces a package's resolved assembly with one compiled locally from the package's own source, leaving restore and the dependency graph untouched. Populate the cache with the nuget-to-complog tool.</Description>
-    <PackageTags>nuget;msbuild;source-build;osmf;reproducible-builds</PackageTags>
+    <PackageTags>nuget;msbuild;source-build;provenance;reproducible-builds</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/slang25/nuget-to-complog</RepositoryUrl>

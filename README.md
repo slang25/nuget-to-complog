@@ -152,11 +152,10 @@ Restore is untouched, so the dependency graph â€” transitive packages included â
 before, and `deps.json` still describes the package as it always did. Only the assembly the
 compiler reads and the output directory receives is different.
 
-That combination is what the [Open Source Maintenance Fee](https://opensourcemaintenancefee.org)
-model asks for: the source is freely licensed, the published binary is the thing being paid for,
-and compiling it yourself is the alternative the agreement names. A package's OSMF-licensed
-transitive dependencies keep resolving as published packages, since nothing about the graph
-changes.
+Useful where a package licenses its compiled binary on different terms from its source, where
+policy says dependencies must be built in-house, or where you just want evidence that a published
+binary matches the source it claims to come from. Nothing about the dependency graph changes, so a
+source-built package's own dependencies keep resolving as published packages.
 
 **It stays private to your repository.** The build package ships its assets under `build/`, not
 `buildTransitive/`, and is a `DevelopmentDependency`. If you pack a library that source-builds one
