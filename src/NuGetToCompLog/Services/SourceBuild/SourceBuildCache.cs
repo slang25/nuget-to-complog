@@ -79,6 +79,12 @@ public record SourceBuildProvenance
 /// substituting one for another would silently change which APIs exist. The cache holds the
 /// assembly, its PDB, the complog it was built from and the provenance record, so a build that
 /// consumes it can be re-derived and audited later without going back to nuget.org.
+///
+/// One triple can hold several assemblies: a package that ships nunit.framework.dll beside
+/// nunit.framework.legacy.dll resolves both out of the same lib folder, and a build that asked for
+/// the package expects both to be substituted. So the assembly, its PDB and its provenance are
+/// per-assembly - the provenance file is named after the assembly it describes - while the complog
+/// and the ledger, which cover the package's whole extraction, are shared by the entry.
 /// </summary>
 public class SourceBuildCache
 {
@@ -117,6 +123,14 @@ public class SourceBuildCache
         Path.Combine(DirectoryFor(packageId, version, targetFramework), assemblyFileName);
 
     /// <summary>
+    /// The provenance record for one cached assembly. Named after the assembly rather than the
+    /// entry, so a second assembly built for the same triple adds a record instead of replacing
+    /// the first one's. <see cref="CachedAssembly"/> in the MSBuild task derives the same name.
+    /// </summary>
+    public string ProvenancePath(string packageId, string version, string targetFramework, string assemblyFileName) =>
+        Path.Combine(DirectoryFor(packageId, version, targetFramework), $"{assemblyFileName}.provenance.json");
+
+    /// <summary>
     /// True when the cache holds an intact assembly for this triple, checked against the hash its
     /// own provenance recorded so a truncated or edited file is treated as a miss.
     ///
@@ -133,7 +147,7 @@ public class SourceBuildCache
             return false;
         }
 
-        var provenance = TryReadProvenance(packageId, version, targetFramework);
+        var provenance = TryReadProvenance(packageId, version, targetFramework, assemblyFileName);
         return provenance != null &&
                string.Equals(provenance.AssemblyFileName, assemblyFileName, StringComparison.OrdinalIgnoreCase) &&
                string.Equals(Sha256(path), provenance.Sha256, StringComparison.OrdinalIgnoreCase);
@@ -141,8 +155,9 @@ public class SourceBuildCache
 
     /// <summary>
     /// Stores a rebuilt assembly with everything needed to justify it later, and returns the
-    /// provenance record. Writes into a fresh directory so a previous, differently-classified
-    /// build of the same triple cannot leave stale files behind.
+    /// provenance record. Replaces whatever was cached for this assembly - a previous,
+    /// differently-classified build of it leaves nothing behind - while any other assembly cached
+    /// for the same triple keeps its own files and its own record.
     /// </summary>
     public async Task<SourceBuildProvenance> StoreAsync(
         string packageId,
@@ -161,14 +176,16 @@ public class SourceBuildCache
         int? surfaceMembersChecked = null)
     {
         var directory = DirectoryFor(packageId, version, targetFramework);
-        if (Directory.Exists(directory))
-        {
-            Directory.Delete(directory, recursive: true);
-        }
         Directory.CreateDirectory(directory);
 
         var assemblyFileName = Path.GetFileName(rebuiltAssembly);
         var destination = Path.Combine(directory, assemblyFileName);
+
+        // Clear this assembly's own record first: until the new one is written, a reader that
+        // finds the file must not find a hash that once matched it.
+        var provenancePath = ProvenancePath(packageId, version, targetFramework, assemblyFileName);
+        File.Delete(provenancePath);
+
         File.Copy(rebuiltAssembly, destination, overwrite: true);
 
         if (rebuiltPdb != null && File.Exists(rebuiltPdb))
@@ -201,16 +218,15 @@ public class SourceBuildCache
             ComplogSha256 = Sha256(cachedComplog),
         };
 
-        await File.WriteAllTextAsync(
-            Path.Combine(directory, "provenance.json"),
-            JsonSerializer.Serialize(provenance, JsonOptions));
+        await File.WriteAllTextAsync(provenancePath, JsonSerializer.Serialize(provenance, JsonOptions));
 
         return provenance;
     }
 
-    public SourceBuildProvenance? TryReadProvenance(string packageId, string version, string targetFramework)
+    public SourceBuildProvenance? TryReadProvenance(
+        string packageId, string version, string targetFramework, string assemblyFileName)
     {
-        var path = Path.Combine(DirectoryFor(packageId, version, targetFramework), "provenance.json");
+        var path = ProvenancePath(packageId, version, targetFramework, assemblyFileName);
         if (!File.Exists(path))
         {
             return null;

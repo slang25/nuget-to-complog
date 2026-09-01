@@ -76,8 +76,8 @@ it is the same standard as building the library from its repository yourself. Se
 `-p:NuGetToCompLogFetchCompiler=true` to download the original compiler and aim for the stronger
 outcomes.
 
-`provenance.json`, written beside the cached assembly, records which was reached. Read it when
-someone asks what a shipped binary actually is.
+`<assembly>.provenance.json`, written beside the cached assembly it describes, records which was
+reached. Read it when someone asks what a shipped binary actually is.
 
 ## When it refuses
 
@@ -90,6 +90,9 @@ someone asks what a shipped binary actually is.
   deliberately.
 - **A marker that resolves no assembly** (`NTCL1001`) — typically a typo, or an analyzer-only
   package that ships no lib assembly.
+- **An asset a source build cannot cover** (`NTCL1003`) — a RID-specific managed assembly under
+  `runtimes/`, say. Substituting the compile-time reference and leaving that one in place would
+  compile against the source build and run against the vendor binary.
 
 ## Things to know
 

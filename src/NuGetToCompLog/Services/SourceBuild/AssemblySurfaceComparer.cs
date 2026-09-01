@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
@@ -85,7 +86,8 @@ public static class AssemblySurfaceComparer
                 .Order(StringComparer.Ordinal)
                 .ToList();
             var implements = interfaces.Count == 0 ? "" : $" implements {string.Join(",", interfaces)}";
-            surface.Add($"T:{typeName}{Modifiers(type.Attributes)}{baseType}{implements}");
+            var typeConstraints = GenericParameters(reader, type.GetGenericParameters(), provider);
+            surface.Add($"T:{typeName}{typeConstraints}{Modifiers(type.Attributes)}{baseType}{implements}");
 
             foreach (var methodHandle in type.GetMethods())
             {
@@ -96,8 +98,12 @@ public static class AssemblySurfaceComparer
                 }
                 var signature = method.DecodeSignature(provider, null);
                 var parameters = string.Join(", ", signature.ParameterTypes);
-                var generics = signature.GenericParameterCount > 0 ? $"`{signature.GenericParameterCount}" : "";
-                surface.Add($"M:{typeName}.{reader.GetString(method.Name)}{generics}({parameters}) : {signature.ReturnType}");
+                var generics = signature.GenericParameterCount > 0
+                    ? $"`{signature.GenericParameterCount}{GenericParameters(reader, method.GetGenericParameters(), provider)}"
+                    : "";
+                surface.Add(
+                    $"M:{typeName}.{reader.GetString(method.Name)}{generics}({parameters}) : {signature.ReturnType}" +
+                    Modifiers(method.Attributes));
             }
 
             foreach (var fieldHandle in type.GetFields())
@@ -107,7 +113,10 @@ public static class AssemblySurfaceComparer
                 {
                     continue;
                 }
-                surface.Add($"F:{typeName}.{reader.GetString(field.Name)} : {field.DecodeSignature(provider, null)}");
+                var constant = ConstantValue(reader, field);
+                surface.Add(
+                    $"F:{typeName}.{reader.GetString(field.Name)} : {field.DecodeSignature(provider, null)}" +
+                    $"{constant}{Modifiers(field.Attributes)}");
             }
 
             // Properties and events are accessor pairs at the IL level, but a consumer binds to
@@ -228,6 +237,158 @@ public static class AssemblySurfaceComparer
         }
     }
 
+    /// <summary>
+    /// The parts of a method a consumer binds to beyond its signature. Making a method
+    /// non-static, or narrowing it from public to protected, breaks callers that compile against
+    /// it while leaving the rendered signature untouched - so accessibility and the
+    /// static/abstract/virtual/sealed shape are part of its identity here.
+    /// </summary>
+    private static string Modifiers(MethodAttributes attributes)
+    {
+        var parts = new List<string>
+        {
+            (attributes & MethodAttributes.MemberAccessMask) switch
+            {
+                MethodAttributes.Public => "public",
+                MethodAttributes.Family => "protected",
+                MethodAttributes.FamORAssem => "protected internal",
+                _ => "?",
+            },
+        };
+        if ((attributes & MethodAttributes.Static) != 0)
+        {
+            parts.Add("static");
+        }
+        if ((attributes & MethodAttributes.Abstract) != 0)
+        {
+            parts.Add("abstract");
+        }
+        else if ((attributes & MethodAttributes.Virtual) != 0)
+        {
+            // NewSlot introduces a new virtual; without it the method overrides one it inherited,
+            // and the two are not interchangeable to a derived type in another assembly.
+            parts.Add((attributes & MethodAttributes.NewSlot) != 0 ? "virtual" : "override");
+        }
+        if ((attributes & MethodAttributes.Final) != 0)
+        {
+            parts.Add("sealed");
+        }
+        return $" [{string.Join(" ", parts)}]";
+    }
+
+    /// <summary>
+    /// The same for a field. A const's value is compiled into every caller, so changing it
+    /// changes what consumers do without changing anything a signature comparison would see;
+    /// static and readonly are equally observable at the call site.
+    /// </summary>
+    private static string Modifiers(FieldAttributes attributes)
+    {
+        var parts = new List<string>
+        {
+            (attributes & FieldAttributes.FieldAccessMask) switch
+            {
+                FieldAttributes.Public => "public",
+                FieldAttributes.Family => "protected",
+                FieldAttributes.FamORAssem => "protected internal",
+                _ => "?",
+            },
+        };
+        if ((attributes & FieldAttributes.Literal) != 0)
+        {
+            parts.Add("const");
+        }
+        else if ((attributes & FieldAttributes.Static) != 0)
+        {
+            parts.Add("static");
+        }
+        if ((attributes & FieldAttributes.InitOnly) != 0)
+        {
+            parts.Add("readonly");
+        }
+        return $" [{string.Join(" ", parts)}]";
+    }
+
+    /// <summary>
+    /// A literal field's value, rendered from the constant blob, or "" when the field has none.
+    /// </summary>
+    private static string ConstantValue(MetadataReader reader, FieldDefinition field)
+    {
+        var handle = field.GetDefaultValue();
+        if (handle.IsNil)
+        {
+            return "";
+        }
+
+        var constant = reader.GetConstant(handle);
+        var blob = reader.GetBlobReader(constant.Value);
+        var value = constant.TypeCode switch
+        {
+            ConstantTypeCode.Boolean => blob.ReadBoolean().ToString(),
+            ConstantTypeCode.Char => ((int)blob.ReadChar()).ToString(CultureInfo.InvariantCulture),
+            ConstantTypeCode.SByte => blob.ReadSByte().ToString(CultureInfo.InvariantCulture),
+            ConstantTypeCode.Byte => blob.ReadByte().ToString(CultureInfo.InvariantCulture),
+            ConstantTypeCode.Int16 => blob.ReadInt16().ToString(CultureInfo.InvariantCulture),
+            ConstantTypeCode.UInt16 => blob.ReadUInt16().ToString(CultureInfo.InvariantCulture),
+            ConstantTypeCode.Int32 => blob.ReadInt32().ToString(CultureInfo.InvariantCulture),
+            ConstantTypeCode.UInt32 => blob.ReadUInt32().ToString(CultureInfo.InvariantCulture),
+            ConstantTypeCode.Int64 => blob.ReadInt64().ToString(CultureInfo.InvariantCulture),
+            ConstantTypeCode.UInt64 => blob.ReadUInt64().ToString(CultureInfo.InvariantCulture),
+            ConstantTypeCode.Single => blob.ReadSingle().ToString("R", CultureInfo.InvariantCulture),
+            ConstantTypeCode.Double => blob.ReadDouble().ToString("R", CultureInfo.InvariantCulture),
+            ConstantTypeCode.String => $"\"{blob.ReadUTF16(blob.RemainingBytes)}\"",
+            ConstantTypeCode.NullReference => "null",
+            _ => "?",
+        };
+        return $" = {value}";
+    }
+
+    /// <summary>
+    /// Generic parameters with their variance and constraints. A constraint is part of what a
+    /// caller may substitute, so tightening one is a breaking change that leaves the arity - the
+    /// only thing a signature records - unmoved.
+    /// </summary>
+    private static string GenericParameters(
+        MetadataReader reader, GenericParameterHandleCollection parameters, TypeNameProvider provider)
+    {
+        if (parameters.Count == 0)
+        {
+            return "";
+        }
+
+        var rendered = new List<string>();
+        foreach (var handle in parameters)
+        {
+            var parameter = reader.GetGenericParameter(handle);
+            var parts = new List<string>();
+            switch (parameter.Attributes & GenericParameterAttributes.VarianceMask)
+            {
+                case GenericParameterAttributes.Covariant:
+                    parts.Add("out");
+                    break;
+                case GenericParameterAttributes.Contravariant:
+                    parts.Add("in");
+                    break;
+            }
+            if ((parameter.Attributes & GenericParameterAttributes.ReferenceTypeConstraint) != 0)
+            {
+                parts.Add("class");
+            }
+            if ((parameter.Attributes & GenericParameterAttributes.NotNullableValueTypeConstraint) != 0)
+            {
+                parts.Add("struct");
+            }
+            if ((parameter.Attributes & GenericParameterAttributes.DefaultConstructorConstraint) != 0)
+            {
+                parts.Add("new()");
+            }
+            parts.AddRange(parameter.GetConstraints()
+                .Select(c => TypeName(reader, reader.GetGenericParameterConstraint(c).Type, provider))
+                .Order(StringComparer.Ordinal));
+            rendered.Add($"{reader.GetString(parameter.Name)}{(parts.Count == 0 ? "" : $": {string.Join(", ", parts)}")}");
+        }
+        return $"<{string.Join("; ", rendered)}>";
+    }
+
     private static string Modifiers(TypeAttributes attributes)
     {
         var parts = new List<string>();
@@ -299,8 +460,12 @@ public static class AssemblySurfaceComparer
 
         public string GetGenericTypeParameter(object? genericContext, int index) => $"!{index}";
 
-        // Custom modifiers (modreq/modopt) carry no meaning a consumer binds to by name.
-        public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) => unmodifiedType;
+        // A required modifier is part of the signature the runtime and the compiler match on -
+        // `in` and `ref readonly` parameters are a modreq, and so is an init-only setter - so
+        // dropping it would hide a change a consumer cannot compile through. Optional modifiers
+        // are ignored, as C# itself ignores them.
+        public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) =>
+            isRequired ? $"{unmodifiedType} modreq({modifier})" : unmodifiedType;
 
         public string GetPinnedType(string elementType) => elementType;
 

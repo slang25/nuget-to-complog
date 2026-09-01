@@ -6,10 +6,12 @@ namespace NuGetToCompLog.SourceBuild;
 /// <summary>
 /// A source-built assembly in the machine-local cache, and the record the tool wrote beside it.
 ///
-/// The cache layout - &lt;root&gt;/&lt;id&gt;/&lt;version&gt;/&lt;lib tfm&gt;/&lt;assembly&gt; - is the
-/// whole contract between the tool that writes it and this task. Nothing else is shared: there is
-/// no lock file to keep in step, because the build already knows the package id, the version its
-/// graph resolved and the asset it picked, and passes all three to the tool.
+/// The cache layout - &lt;root&gt;/&lt;id&gt;/&lt;version&gt;/&lt;lib tfm&gt;/&lt;assembly&gt;, with the
+/// record beside it at &lt;assembly&gt;.provenance.json - is the whole contract between the tool that
+/// writes it and this task. Nothing else is shared: there is no lock file to keep in step, because
+/// the build already knows the package id, the version its graph resolved and the asset it picked,
+/// and passes all three to the tool. The record is named after the assembly because one package and
+/// target framework can hold several, each built and recorded separately.
 /// </summary>
 public sealed class CachedAssembly
 {
@@ -48,7 +50,7 @@ public sealed class CachedAssembly
 
     private string? RecordedHash()
     {
-        var provenance = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(Path)!, "provenance.json");
+        var provenance = Path + ".provenance.json";
         if (!File.Exists(provenance))
         {
             return null;

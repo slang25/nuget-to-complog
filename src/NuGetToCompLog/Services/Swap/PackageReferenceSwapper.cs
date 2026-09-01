@@ -210,8 +210,20 @@ public static partial class PackageReferenceSwapper
         foreach (var (start, end) in spans)
         {
             var element = text[start..end];
-            if (HasSourceBuildAttribute(element))
+            var existing = SourceBuildAttribute().Match(element, 0, ScanTag(element, 0).End);
+            if (existing.Success)
             {
+                // SourceBuild="false" is a reference that is *not* consumed as a source build.
+                // Reporting it as already marked would leave the feature off while saying it is on,
+                // so the attribute is rewritten; an already-true one is left exactly as it is.
+                if (IsTrue(existing.Groups[1].Value))
+                {
+                    continue;
+                }
+
+                rewritten.Remove(start + existing.Index, existing.Length)
+                    .Insert(start + existing.Index, " SourceBuild=\"true\"");
+                marked++;
                 continue;
             }
 
@@ -282,6 +294,12 @@ public static partial class PackageReferenceSwapper
     ///
     /// An existing reference is left exactly as it is, version included: whoever put it there -
     /// a person, Renovate, a Directory.Build.props - gets to keep deciding.
+    ///
+    /// "Beside" means beside an unconditional one. A multi-targeting project often splits its
+    /// package references by target framework, and landing in one of those groups would import the
+    /// substitution targets for that framework alone - every other one would then build against the
+    /// published binary while the project file says otherwise. When every existing reference is
+    /// conditional, a new unconditional ItemGroup is added instead.
     /// </summary>
     public static bool EnsureBuildPackageReference(string projectPath, string packageId, string version)
     {
@@ -301,9 +319,10 @@ public static partial class PackageReferenceSwapper
         var lineStarts = LineStarts(text);
         var rewritten = new StringBuilder(text);
 
-        if (packageReferences.Count > 0)
+        var unconditional = packageReferences.Where(e => !IsConditional(e)).ToList();
+        if (unconditional.Count > 0)
         {
-            var last = ElementSpan(text, lineStarts, packageReferences[^1]);
+            var last = ElementSpan(text, lineStarts, unconditional[^1]);
             var indent = IndentAt(text, last.Start);
             var newLine = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
             rewritten.Insert(last.End, $"{newLine}{indent}{item}");
@@ -329,6 +348,22 @@ public static partial class PackageReferenceSwapper
         return true;
     }
 
+    /// <summary>
+    /// True when the item, or anything containing it up to the Project element, carries a
+    /// Condition - so whether it takes part in the build depends on something evaluated later.
+    /// </summary>
+    private static bool IsConditional(XElement element)
+    {
+        for (var current = element; current != null && current.Name.LocalName != "Project"; current = current.Parent)
+        {
+            if (!string.IsNullOrWhiteSpace((string?)current.Attribute("Condition")))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// <summary>The whitespace preceding <paramref name="offset"/> on its own line.</summary>
     private static string IndentAt(string text, int offset)
     {
@@ -347,8 +382,8 @@ public static partial class PackageReferenceSwapper
         return (Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'), hadBom);
     }
 
-    private static bool HasSourceBuildAttribute(string element) =>
-        SourceBuildAttribute().IsMatch(element[..ScanTag(element, 0).End]);
+    private static bool IsTrue(string quotedValue) =>
+        string.Equals(quotedValue.Trim('"', '\''), "true", StringComparison.OrdinalIgnoreCase);
 
     [System.Text.RegularExpressions.GeneratedRegex(
         """\s+SourceBuild\s*=\s*("[^"]*"|'[^']*')""",

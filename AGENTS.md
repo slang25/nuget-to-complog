@@ -97,8 +97,11 @@ the package shipped, without ejecting source anywhere. Marking a PackageReferenc
   file or a project-file probe: both are worse guesses at something the build already knows, and
   both can disagree with it.
 - **`SourceBuildCache`** keys on `(package id, version, lib TFM)` and stores the assembly, the
-  complog it came from and `provenance.json` together. That layout is the only contract between the
-  tool and the task — `CachedAssemblyContractTests` is what stops the two drifting apart.
+  complog it came from and `<assembly>.provenance.json` together. That layout is the only contract
+  between the tool and the task — `CachedAssemblyContractTests` is what stops the two drifting
+  apart. The record is per *assembly*, not per entry: one package and TFM can ship several
+  (`nunit.framework.dll` beside `nunit.framework.legacy.dll`), a build resolves all of them, and
+  caching the second must not evict the first.
 
 Rules that are easy to break:
 
@@ -106,10 +109,12 @@ Rules that are easy to break:
    `HintPath` over its identity, so an item carrying the package folder's `HintPath` resolves
    straight back to the published binary — the substitution then appears to work everywhere except
    the one place that decides what the compiler reads.
-2. **Never fall back silently.** A marker that resolves no assembly and a cached file that fails
-   its recorded hash are hard errors (`NTCL1001`, `NTCL1002`). Building against the published
-   binary when a source build was asked for is the failure this feature exists to prevent, and it
-   has no other symptom.
+2. **Never fall back silently.** A marker that resolves no assembly, a cached file that fails its
+   recorded hash, and a managed asset no source build covers (a RID-specific assembly under
+   `runtimes/`) are hard errors (`NTCL1001`, `NTCL1002`, `NTCL1003`). Only native and satellite
+   assets are passed over quietly, because neither carries the library's own code. Building
+   against the published binary when a source build was asked for is the failure this feature
+   exists to prevent, and it has no other symptom.
 3. **The substitution must never escape the repository that chose it.** Assets ship under `build/`
    and never `buildTransitive/`, and the package is a `DevelopmentDependency`. Replacing a
    dependency's binary is a decision about your own build, not one to make for anyone who consumes

@@ -112,6 +112,20 @@ public sealed class ResolveSourceBuiltAssemblies : Task
         }
     }
 
+    /// <summary>
+    /// True for an asset that carries the library's own compiled code. A native binary under
+    /// runtimes/&lt;rid&gt;/native is not a .NET compilation at all, and a satellite
+    /// *.resources.dll holds localized resources rather than the code being source-built, so
+    /// neither is something the substitution has to account for.
+    /// </summary>
+    private static bool IsManagedAssembly(string pathInPackage)
+    {
+        var path = pathInPackage.Replace('\\', '/');
+        return path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) &&
+               !path.EndsWith(".resources.dll", StringComparison.OrdinalIgnoreCase) &&
+               path.IndexOf("/native/", StringComparison.OrdinalIgnoreCase) < 0;
+    }
+
     private (List<ITaskItem> Removed, List<ITaskItem> Added, List<ITaskItem> Substitutions,
              List<ITaskItem> Missing, HashSet<string> Matched) Substitute(
         ITaskItem[] items, HashSet<string> requested, bool rewriteHintPath)
@@ -135,8 +149,26 @@ public sealed class ResolveSourceBuiltAssemblies : Task
             var cached = CachedAssembly.For(CacheRoot, packageId, version, pathInPackage);
             if (cached == null)
             {
-                // A RID-specific or otherwise unusual asset. Not something a source build covers,
-                // and not something to fail the build over either.
+                // Not a lib/ or ref/ assembly, so there is no source build for it. Native and
+                // satellite assets are fine to leave alone - neither is a compilation this tool
+                // reproduces, and neither carries the library's own code. A managed assembly is
+                // not: leaving a RID-specific one in place would compile against the source build
+                // and then run against the vendor binary, which is the silent half-substitution
+                // this feature exists to prevent.
+                if (IsManagedAssembly(pathInPackage))
+                {
+                    matched.Add(packageId);
+                    if (!ReportMissingOnly)
+                    {
+                        Log.LogError(null, "NTCL1003", null, null, 0, 0, 0, 0,
+                            "{0} {1} is consumed as a source build, but this project resolves {2} from it, " +
+                            "which a source build cannot replace - only lib/ and ref/ assemblies are built. " +
+                            "The compilation would use the source build while execution used the published " +
+                            "binary. Remove the SourceBuild marker, or set " +
+                            "NuGetToCompLogDisableSourceBuild=true for this build.",
+                            packageId, version, pathInPackage);
+                    }
+                }
                 continue;
             }
 

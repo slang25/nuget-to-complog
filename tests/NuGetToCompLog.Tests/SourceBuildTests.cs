@@ -98,6 +98,32 @@ public class SourceBuildMarkerTests : IDisposable
     }
 
     [Fact]
+    public void MarkSourceBuild_RewritesAnExplicitFalse()
+    {
+        // SourceBuild="false" is the feature switched off. Treating it as already marked would
+        // report the package as source-built while the build kept using the published binary.
+        var path = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Serilog" Version="4.4.0" SourceBuild="false" />
+                <PackageReference Include="Serilog" Version="4.4.0" SourceBuild='TRUE' />
+              </ItemGroup>
+            </Project>
+            """);
+
+        Assert.Equal(1, PackageReferenceSwapper.MarkSourceBuild(path, "Serilog"));
+
+        Assert.Equal("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Serilog" Version="4.4.0" SourceBuild="true" />
+                <PackageReference Include="Serilog" Version="4.4.0" SourceBuild='TRUE' />
+              </ItemGroup>
+            </Project>
+            """, File.ReadAllText(path));
+    }
+
+    [Fact]
     public void MarkSourceBuild_KeepsSpacingOfATagWithNoSpaceBeforeTheSlash()
     {
         var path = WriteProject("""
@@ -192,6 +218,40 @@ public class SourceBuildMarkerTests : IDisposable
     }
 
     [Fact]
+    public void EnsureBuildPackageReference_DoesNotLandInAConditionalItemGroup()
+    {
+        // Inside a per-framework group the substitution targets would be imported for that
+        // framework alone, and every other one would quietly build against the published binary.
+        var path = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+                <PackageReference Include="Serilog" Version="4.0.0" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+                <PackageReference Include="Serilog" Version="4.4.0" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        Assert.True(PackageReferenceSwapper.EnsureBuildPackageReference(path, "NuGetToCompLog.SourceBuild", "0.4.0"));
+
+        Assert.Equal("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+                <PackageReference Include="Serilog" Version="4.0.0" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+                <PackageReference Include="Serilog" Version="4.4.0" />
+              </ItemGroup>
+
+              <ItemGroup>
+                <PackageReference Include="NuGetToCompLog.SourceBuild" Version="0.4.0" PrivateAssets="all" />
+              </ItemGroup>
+            </Project>
+            """, File.ReadAllText(path));
+    }
+
+    [Fact]
     public void EnsureBuildPackageReference_CreatesAnItemGroupWhenThereIsNone()
     {
         var path = WriteProject("""
@@ -239,11 +299,12 @@ public class SourceBuildCacheTests : IDisposable
         }
     }
 
-    private async Task<(SourceBuildCache Cache, SourceBuildProvenance Provenance)> StoreAsync(string content = "assembly")
+    private async Task<(SourceBuildCache Cache, SourceBuildProvenance Provenance)> StoreAsync(
+        string content = "assembly", string assemblyFileName = "Serilog.dll")
     {
         var staging = Path.Combine(_root, "staging");
         Directory.CreateDirectory(staging);
-        var assembly = Path.Combine(staging, "Serilog.dll");
+        var assembly = Path.Combine(staging, assemblyFileName);
         var complog = Path.Combine(staging, "Serilog.4.4.0.complog");
         await File.WriteAllTextAsync(assembly, content);
         await File.WriteAllTextAsync(complog, "complog");
@@ -263,7 +324,7 @@ public class SourceBuildCacheTests : IDisposable
         var directory = cache.DirectoryFor("Serilog", "4.4.0", "net8.0");
         Assert.True(File.Exists(Path.Combine(directory, "Serilog.dll")));
         Assert.True(File.Exists(Path.Combine(directory, "Serilog.4.4.0.complog")));
-        Assert.True(File.Exists(Path.Combine(directory, "provenance.json")));
+        Assert.True(File.Exists(Path.Combine(directory, "Serilog.dll.provenance.json")));
     }
 
     [Fact]
@@ -271,7 +332,7 @@ public class SourceBuildCacheTests : IDisposable
     {
         var (cache, provenance) = await StoreAsync();
 
-        var read = cache.TryReadProvenance("Serilog", "4.4.0", "net8.0");
+        var read = cache.TryReadProvenance("Serilog", "4.4.0", "net8.0", "Serilog.dll");
         Assert.NotNull(read);
         Assert.Equal(BinaryEquivalence.ContentEquivalent, read.Equivalence);
         Assert.Equal(["MVID"], read.AcceptedDifferences);
@@ -296,14 +357,28 @@ public class SourceBuildCacheTests : IDisposable
     }
 
     [Fact]
-    public async Task Store_ReplacesAPreviousBuildRatherThanMergingWithIt()
+    public async Task Store_ReplacesTheEarlierBuildOfTheSameAssembly()
     {
-        var (cache, _) = await StoreAsync();
-        File.WriteAllText(Path.Combine(cache.DirectoryFor("Serilog", "4.4.0", "net8.0"), "stale.dll"), "x");
+        await StoreAsync();
 
-        await StoreAsync("different");
+        var (cache, provenance) = await StoreAsync("different");
 
-        Assert.False(File.Exists(Path.Combine(cache.DirectoryFor("Serilog", "4.4.0", "net8.0"), "stale.dll")));
+        Assert.True(cache.Contains("Serilog", "4.4.0", "net8.0", "Serilog.dll"));
+        Assert.Equal(provenance.Sha256, cache.TryReadProvenance("Serilog", "4.4.0", "net8.0", "Serilog.dll")!.Sha256);
+    }
+
+    [Fact]
+    public async Task Store_KeepsTheOtherAssembliesBuiltForTheSamePackageAndFramework()
+    {
+        // NUnit ships nunit.framework.dll beside nunit.framework.legacy.dll for one framework, and
+        // a build that asked for the package resolves both. Caching the second must not evict the
+        // first, or the build fails NTCL1002 on an assembly that was just built.
+        var (cache, _) = await StoreAsync(assemblyFileName: "Serilog.dll");
+
+        await StoreAsync(assemblyFileName: "Serilog.Extensions.dll");
+
+        Assert.True(cache.Contains("Serilog", "4.4.0", "net8.0", "Serilog.dll"));
+        Assert.True(cache.Contains("Serilog", "4.4.0", "net8.0", "Serilog.Extensions.dll"));
     }
 }
 
@@ -404,6 +479,73 @@ public class AssemblySurfaceComparerTests : IDisposable
 
         Assert.False(comparison.Matches);
         Assert.Contains(comparison.MissingFromRebuild, m => m.Contains("Greet") && m.Contains("String"));
+    }
+
+    [Fact]
+    public void AChangedConstValue_IsCaught()
+    {
+        // A const is compiled into every caller, so a rebuild that changes one hands consumers
+        // different behaviour while every signature stays exactly where it was.
+        const string withConst = Library + """
+            public static class Limits { public const int Timeout = 30; }
+            """;
+        var original = Compile(withConst, "K", Microsoft.CodeAnalysis.OptimizationLevel.Debug);
+        var rebuilt = Compile(withConst.Replace("Timeout = 30", "Timeout = 60"), "K2",
+            Microsoft.CodeAnalysis.OptimizationLevel.Release);
+
+        var comparison = AssemblySurfaceComparer.Compare(original, rebuilt);
+
+        Assert.False(comparison.Matches);
+        Assert.Contains(comparison.MissingFromRebuild, m => m.Contains("Timeout") && m.Contains("30"));
+    }
+
+    [Fact]
+    public void AMethodThatStopsBeingStatic_IsCaught()
+    {
+        // Same name, same parameters, same return type - and every caller stops compiling.
+        const string withStatic = Library + """
+            public class Factory { public static Greeter Create() => new(); }
+            """;
+        var original = Compile(withStatic, "L", Microsoft.CodeAnalysis.OptimizationLevel.Debug);
+        var rebuilt = Compile(withStatic.Replace("public static Greeter Create()", "public Greeter Create()"), "L2",
+            Microsoft.CodeAnalysis.OptimizationLevel.Debug);
+
+        var comparison = AssemblySurfaceComparer.Compare(original, rebuilt);
+
+        Assert.False(comparison.Matches);
+        Assert.Contains(comparison.MissingFromRebuild, m => m.Contains("Create") && m.Contains("static"));
+    }
+
+    [Fact]
+    public void APublicMethodNarrowedToProtected_IsCaught()
+    {
+        const string open = Library + """
+            public class Base { public virtual void Run() { } }
+            """;
+        var original = Compile(open, "M", Microsoft.CodeAnalysis.OptimizationLevel.Debug);
+        var rebuilt = Compile(open.Replace("public virtual void Run()", "protected virtual void Run()"), "M2",
+            Microsoft.CodeAnalysis.OptimizationLevel.Debug);
+
+        var comparison = AssemblySurfaceComparer.Compare(original, rebuilt);
+
+        Assert.False(comparison.Matches);
+        Assert.Contains(comparison.MissingFromRebuild, m => m.Contains("Run") && m.Contains("public"));
+    }
+
+    [Fact]
+    public void ATightenedGenericConstraint_IsCaught()
+    {
+        const string generic = Library + """
+            public class Box<T> where T : class { public T? Value; }
+            """;
+        var original = Compile(generic, "N", Microsoft.CodeAnalysis.OptimizationLevel.Debug);
+        var rebuilt = Compile(generic.Replace("where T : class", "where T : class, IThing"), "N2",
+            Microsoft.CodeAnalysis.OptimizationLevel.Debug);
+
+        var comparison = AssemblySurfaceComparer.Compare(original, rebuilt);
+
+        Assert.False(comparison.Matches);
+        Assert.Contains(comparison.MissingFromRebuild, m => m.Contains("Box"));
     }
 
     [Fact]
@@ -526,6 +668,93 @@ public class SourceBuildBuildAssetTests
 }
 
 /// <summary>
+/// The substitution task decides, per resolved asset, whether a source build stands in for it.
+/// Anything it cannot substitute has to say so: a build that compiles against a source build and
+/// then runs against the published binary is the one outcome this feature exists to prevent, and
+/// it has no other symptom.
+/// </summary>
+public class ResolveSourceBuiltAssembliesTests
+{
+    private sealed class RecordingEngine : Microsoft.Build.Framework.IBuildEngine
+    {
+        public List<Microsoft.Build.Framework.BuildErrorEventArgs> Errors { get; } = [];
+
+        public void LogErrorEvent(Microsoft.Build.Framework.BuildErrorEventArgs e) => Errors.Add(e);
+        public void LogWarningEvent(Microsoft.Build.Framework.BuildWarningEventArgs e) { }
+        public void LogMessageEvent(Microsoft.Build.Framework.BuildMessageEventArgs e) { }
+        public void LogCustomEvent(Microsoft.Build.Framework.CustomBuildEventArgs e) { }
+        public bool BuildProjectFile(string projectFileName, string[] targetNames,
+            System.Collections.IDictionary globalProperties, System.Collections.IDictionary targetOutputs) => true;
+        public bool ContinueOnError => false;
+        public int LineNumberOfTaskNode => 0;
+        public int ColumnNumberOfTaskNode => 0;
+        public string ProjectFileOfTaskNode => "test.csproj";
+    }
+
+    private static Microsoft.Build.Utilities.TaskItem Asset(string packageId, string version, string pathInPackage)
+    {
+        var item = new Microsoft.Build.Utilities.TaskItem(pathInPackage);
+        item.SetMetadata("NuGetPackageId", packageId);
+        item.SetMetadata("NuGetPackageVersion", version);
+        item.SetMetadata("PathInPackage", pathInPackage);
+        return item;
+    }
+
+    private static (bool Result, RecordingEngine Engine) Run(params Microsoft.Build.Framework.ITaskItem[] runtimeItems)
+    {
+        var engine = new RecordingEngine();
+        var marker = new Microsoft.Build.Utilities.TaskItem("Contoso.Lib");
+        marker.SetMetadata("SourceBuild", "true");
+
+        var task = new ResolveSourceBuiltAssemblies
+        {
+            BuildEngine = engine,
+            CacheRoot = Path.Combine(Path.GetTempPath(), $"cache-{Guid.NewGuid():N}"),
+            CompileItems = [Asset("Contoso.Lib", "1.0.0", "lib/net8.0/Contoso.Lib.dll")],
+            RuntimeItems = runtimeItems,
+            PackageReferences = [marker],
+        };
+
+        return (task.Execute(), engine);
+    }
+
+    [Fact]
+    public void ARidSpecificManagedAssemblyIsAHardError()
+    {
+        // The compile-time reference would be substituted and this one would not, so the build
+        // would run against the vendor binary while reporting a successful source build.
+        var (result, engine) = Run(
+            Asset("Contoso.Lib", "1.0.0", "lib/net8.0/Contoso.Lib.dll"),
+            Asset("Contoso.Lib", "1.0.0", "runtimes/win-x64/lib/net8.0/Contoso.Lib.dll"));
+
+        Assert.False(result);
+        Assert.Contains(engine.Errors, e => e.Code == "NTCL1003" && e.Message!.Contains("runtimes/win-x64"));
+    }
+
+    [Fact]
+    public void NativeAndSatelliteAssetsAreLeftAloneWithoutComplaint()
+    {
+        // Neither carries the library's own code, so neither is something a source build replaces.
+        var (_, engine) = Run(
+            Asset("Contoso.Lib", "1.0.0", "runtimes/linux-x64/native/libcontoso.dll"),
+            Asset("Contoso.Lib", "1.0.0", "lib/net8.0/de/Contoso.Lib.resources.dll"));
+
+        Assert.DoesNotContain(engine.Errors, e => e.Code == "NTCL1003");
+    }
+
+    [Fact]
+    public void ACachedAssemblyThatWasNeverBuiltStillFailsWithTheCacheError()
+    {
+        // NTCL1003 is about assets a source build cannot cover; a lib asset it can cover but has
+        // not built is still NTCL1002.
+        var (result, engine) = Run(Asset("Contoso.Lib", "1.0.0", "lib/net8.0/Contoso.Lib.dll"));
+
+        Assert.False(result);
+        Assert.Contains(engine.Errors, e => e.Code == "NTCL1002");
+    }
+}
+
+/// <summary>
 /// The cache layout is the only contract between the tool that writes an assembly and the MSBuild
 /// task that finds it. There is nothing else to keep in step - no lock file, no generated targets -
 /// so these tests are what stop the two drifting apart.
@@ -551,11 +780,12 @@ public class CachedAssemblyContractTests : IDisposable
         }
     }
 
-    private async Task<SourceBuildProvenance> StoreAsync(string content = "assembly")
+    private async Task<SourceBuildProvenance> StoreAsync(
+        string content = "assembly", string assemblyFileName = "Serilog.dll")
     {
         var staging = Path.Combine(_root, "staging");
         Directory.CreateDirectory(staging);
-        var assembly = Path.Combine(staging, "Serilog.dll");
+        var assembly = Path.Combine(staging, assemblyFileName);
         var complog = Path.Combine(staging, "Serilog.4.0.0.complog");
         await File.WriteAllTextAsync(assembly, content);
         await File.WriteAllTextAsync(complog, "complog");
@@ -614,6 +844,19 @@ public class CachedAssemblyContractTests : IDisposable
 
         Assert.True(cached.Exists);
         Assert.False(cached.IsIntact());
+    }
+
+    [Fact]
+    public async Task EachAssemblyOfAPackageIsVouchedForByItsOwnRecord()
+    {
+        // One package and target framework can hold several assemblies, so the record the task
+        // reads has to be the one for the assembly it is about to substitute.
+        await StoreAsync(assemblyFileName: "Serilog.dll");
+        await StoreAsync(content: "another assembly", assemblyFileName: "Serilog.Extensions.dll");
+        var root = Path.Combine(_root, "cache");
+
+        Assert.True(CachedAssembly.For(root, "Serilog", "4.0.0", "lib/net8.0/Serilog.dll")!.IsIntact());
+        Assert.True(CachedAssembly.For(root, "Serilog", "4.0.0", "lib/net8.0/Serilog.Extensions.dll")!.IsIntact());
     }
 
     [Fact]

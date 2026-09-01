@@ -175,6 +175,51 @@ public class BundledSkillsTests
     }
 
     [Fact]
+    public async Task ANameIsAcceptedInAnyCaseAndUsedInTheCanonicalOne()
+    {
+        // The name goes on to address a manifest resource and an install directory, and both are
+        // case-sensitive; accepting a name loosely and then using it verbatim throws instead.
+        var output = new StringWriter();
+        var original = Console.Out;
+        Console.SetOut(output);
+        try
+        {
+            var handler = new SkillCommandHandler(new SilentConsole());
+
+            Assert.True(await handler.HandleAsync(
+                install: false, project: false, agent: "claude", force: false, name: "SWAP-NuGet-Dependency"));
+        }
+        finally
+        {
+            Console.SetOut(original);
+        }
+
+        Assert.Contains("name: swap-nuget-dependency", output.ToString());
+    }
+
+    [Fact]
+    public async Task ANameThatIsNotBundledIsRefusedRatherThanRendered()
+    {
+        var handler = new SkillCommandHandler(new SilentConsole());
+
+        Assert.False(await handler.HandleAsync(
+            install: false, project: false, agent: "claude", force: false, name: "no-such-skill"));
+    }
+
+    private sealed class SilentConsole : NuGetToCompLog.Abstractions.IConsoleWriter
+    {
+        public void MarkupLine(string markup) { }
+        public void WriteLine() { }
+        public void WriteException(Exception exception) { }
+        public void WritePanel(string header, string content, string? borderColor = null) { }
+        public void WriteTree(string rootLabel, Dictionary<string, List<string>> nodes) { }
+        public void WriteTable(string[] headers, List<string[]> rows) { }
+        public Task ExecuteWithStatusAsync(string status, Func<Task> action) => action();
+        public void SetIndeterminateProgress() { }
+        public void ClearProgress() { }
+    }
+
+    [Fact]
     public void TheDefaultSkillIsOneOfTheBundledOnes()
     {
         Assert.Contains(SkillCommandHandler.SkillName, SkillCommandHandler.SkillNames);

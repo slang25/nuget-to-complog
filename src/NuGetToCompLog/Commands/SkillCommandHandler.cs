@@ -59,10 +59,16 @@ public partial class SkillCommandHandler
 
     public Task<bool> HandleAsync(bool install, bool project, string agent, bool force, string? name = null)
     {
-        if (name != null && !SkillNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+        if (name != null)
         {
-            _console.MarkupLine($"[red]✗[/] Unknown skill '{name}'. Expected one of: {string.Join(", ", SkillNames)}");
-            return Task.FromResult(false);
+            // Accepted case-insensitively, then used as the canonical name from here on: it goes
+            // on to name a manifest resource and an install directory, and both are case-sensitive.
+            name = SkillNames.FirstOrDefault(s => string.Equals(s, name, StringComparison.OrdinalIgnoreCase));
+            if (name == null)
+            {
+                _console.MarkupLine($"[red]✗[/] Unknown skill. Expected one of: {string.Join(", ", SkillNames)}");
+                return Task.FromResult(false);
+            }
         }
 
         if (!install)

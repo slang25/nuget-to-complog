@@ -9,6 +9,11 @@ namespace NuGetToCompLog.Services.SourceBuild;
 /// <summary>
 /// The outcome of replaying a complog through csc. <see cref="RebuiltAssembly"/> is the path
 /// csc was told to write, so it is only set when the compilation succeeded.
+///
+/// The two compiler versions are deliberately separate. <see cref="RequestedCompilerVersion"/> is
+/// what the PDB says built the package; <see cref="ActualCompilerVersion"/> is what ran here. They
+/// agree only when <see cref="CompilerWasExact"/> is true, and anything recording what produced
+/// these bytes - a provenance file above all - has to say the second.
 /// </summary>
 public record RebuildOutcome(
     bool Success,
@@ -17,7 +22,8 @@ public record RebuildOutcome(
     string? RebuiltAssembly,
     string? RebuiltPdb,
     string? CscPath,
-    string? CompilerVersion,
+    string? RequestedCompilerVersion,
+    string? ActualCompilerVersion,
     bool CompilerWasExact,
     bool RuntimeWasExact)
 {
@@ -172,11 +178,12 @@ public class ComplogRebuilder
         return new RebuildOutcome(
             true, null, exportDir, rebuiltDll,
             ResolveRspPath(rspLines, "/pdb:", exportDir),
-            cscPath, compilerVersion, compiler.CompilerWasExact, compiler.RuntimeWasExact);
+            cscPath, compilerVersion, CompilerVersionReader.TryGetInformationalVersion(cscPath),
+            compiler.CompilerWasExact, compiler.RuntimeWasExact);
     }
 
     private static RebuildOutcome Failed(string exportDir, string reason) =>
-        new(false, reason, exportDir, null, null, null, null, false, false);
+        new(false, reason, exportDir, null, null, null, null, null, false, false);
 
     public static string? ResolveRspPath(string[] rspLines, string prefix, string exportDir)
     {

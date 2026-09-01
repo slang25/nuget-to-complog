@@ -233,11 +233,15 @@ reconstruction ledger, which separately accounts for every input that went into 
   `--allow-divergent` accepts it deliberately; the provenance record then says so.
 - **A marker that resolves nothing.** A package named for source building that contributes no
   assembly — a typo, or an analyzer-only package — fails the build with `NTCL1001`. So does a
-  cached assembly that no longer matches what was recorded for it (`NTCL1002`). Quietly building
-  against the published binary when a source build was asked for is the one outcome this feature
-  cannot have.
+  cached assembly that no longer matches what was recorded for it (`NTCL1002`), and an asset a
+  source build cannot cover, such as a RID-specific managed assembly under `runtimes/`
+  (`NTCL1003`) — compiling against the source build and then running against the vendor binary is
+  no better than not substituting at all. Quietly building against the published binary when a
+  source build was asked for is the one outcome this feature cannot have.
 
-`provenance.json`, written beside the cached assembly, records which standard was met and on what:
+`Serilog.dll.provenance.json`, written beside the cached assembly it describes (one per assembly,
+since a package can ship several for one target framework), records which standard was met and on
+what:
 
 ```json
 {

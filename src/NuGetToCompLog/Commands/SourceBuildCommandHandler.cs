@@ -248,7 +248,7 @@ public class SourceBuildCommandHandler
         var provenance = await cache.StoreAsync(
             asset.PackageId, asset.Version, asset.PackageTargetFramework,
             rebuild.RebuiltAssembly!, rebuild.RebuiltPdb, complogPath, ledgerPath,
-            equivalence, comparison.DerivedDifferences, rebuild.CompilerVersion?.Split('+')[0],
+            equivalence, comparison.DerivedDifferences, rebuild.ActualCompilerVersion?.Split('+')[0],
             rebuild.CompilerWasExact, rebuild.RuntimeWasExact,
             result.Ledger.Outlook.ToString().ToLowerInvariant(), surface?.SurfaceSize);
 
@@ -393,9 +393,10 @@ public class SourceBuildCommandHandler
 
     private void ReportToolchain(RebuildOutcome rebuild)
     {
-        if (!rebuild.CompilerWasExact && rebuild.CompilerVersion != null)
+        if (!rebuild.CompilerWasExact && rebuild.RequestedCompilerVersion != null)
         {
-            _console.MarkupLine($"  [dim]Compiler: this machine's, not the {rebuild.CompilerVersion.Split('+')[0]} the package used[/]");
+            _console.MarkupLine($"  [dim]Compiler: {rebuild.ActualCompilerVersion?.Split('+')[0] ?? "this machine's"}, " +
+                                $"not the {rebuild.RequestedCompilerVersion.Split('+')[0]} the package used[/]");
         }
         if (!rebuild.RuntimeWasExact)
         {

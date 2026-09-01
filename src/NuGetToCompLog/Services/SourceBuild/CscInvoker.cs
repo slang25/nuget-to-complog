@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using NuGetToCompLog.Abstractions;
 
 namespace NuGetToCompLog.Services.SourceBuild;
@@ -111,8 +112,52 @@ public class CscInvoker
         string.Equals(CompilerVersionReader.TryGetInformationalVersion(cscPath), compilerVersion,
             StringComparison.OrdinalIgnoreCase);
 
-    private static string GetDotnetRoot() =>
-        Environment.GetEnvironmentVariable("DOTNET_ROOT") ?? "/usr/local/share/dotnet";
+    /// <summary>
+    /// Where the .NET installation is. This process is already running on one, so the runtime
+    /// directory it was loaded from says where - which beats guessing at an install location that
+    /// differs on every platform (/usr/local/share/dotnet on macOS, %ProgramFiles%\dotnet on
+    /// Windows, /usr/share/dotnet on most Linux distributions) and would leave the tool unable to
+    /// find a compiler on the very machine hosting it. DOTNET_ROOT still wins, so a build that
+    /// points at a private installation gets that one.
+    /// </summary>
+    private static string GetDotnetRoot()
+    {
+        var configured = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        if (!string.IsNullOrEmpty(configured))
+        {
+            return configured;
+        }
+
+        return RootOfHostingRuntime() ?? DefaultInstallLocation();
+    }
+
+    /// <summary>
+    /// The install root above the runtime hosting this process: shared/Microsoft.NETCore.App/&lt;version&gt;
+    /// sits three levels below it. Null when the layout is not that - a self-contained or
+    /// single-file host has no shared framework to walk up from.
+    /// </summary>
+    private static string? RootOfHostingRuntime()
+    {
+        var runtimeDirectory = RuntimeEnvironment.GetRuntimeDirectory();
+        if (string.IsNullOrEmpty(runtimeDirectory))
+        {
+            return null;
+        }
+
+        var version = new DirectoryInfo(runtimeDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var shared = version.Parent?.Parent;
+        return string.Equals(shared?.Name, "shared", StringComparison.OrdinalIgnoreCase) ? shared!.Parent?.FullName : null;
+    }
+
+    private static string DefaultInstallLocation()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet");
+        }
+        return OperatingSystem.IsMacOS() ? "/usr/local/share/dotnet" : "/usr/share/dotnet";
+    }
 
     /// <summary>
     /// Maps the PDB-recorded runtime informational version (e.g. "10.0.9-servicing.26270.113+sha")
