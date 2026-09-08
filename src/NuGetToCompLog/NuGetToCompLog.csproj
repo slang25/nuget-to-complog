@@ -42,7 +42,7 @@
     <PackageReference Include="System.IO.Compression" Version="4.3.0" />
     <PackageReference Include="System.Reflection.Metadata" Version="10.0.11" />
     <PackageReference Include="System.Text.Json" Version="10.0.11" />
-    <PackageReference Include="Basic.CompilerLog.Util" Version="0.9.60" />
+    <PackageReference Include="Basic.CompilerLog.Util" Version="0.9.62" />
     <!-- Direct reference to lift Roslyn above the 4.8 floor Basic.CompilerLog.Util pins:
          validating source generators in-process requires a Roslyn at least as new as the
          generators' analyzer builds (e.g. roslyn4.12 packages). -->
