@@ -35,18 +35,18 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.14" />
-    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.14" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.15" />
     <PackageReference Include="NuGet.Protocol" Version="7.9.0" />
     <PackageReference Include="Spectre.Console" Version="0.57.2" />
     <PackageReference Include="System.IO.Compression" Version="4.3.0" />
-    <PackageReference Include="System.Reflection.Metadata" Version="10.0.14" />
-    <PackageReference Include="System.Text.Json" Version="10.0.14" />
+    <PackageReference Include="System.Reflection.Metadata" Version="10.0.15" />
+    <PackageReference Include="System.Text.Json" Version="10.0.15" />
     <PackageReference Include="Basic.CompilerLog.Util" Version="0.9.66" />
     <!-- Direct reference to lift Roslyn above the 4.8 floor Basic.CompilerLog.Util pins:
          validating source generators in-process requires a Roslyn at least as new as the
          generators' analyzer builds (e.g. roslyn4.12 packages). -->
-    <PackageReference Include="Microsoft.CodeAnalysis" Version="5.9.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis" Version="5.12.0" />
     <!-- Direct reference to override the vulnerable MessagePack 3.1.4 pulled in transitively by
          Basic.CompilerLog.Util. Fixes GHSA-hv8m-jj95-wg3x (patched in 3.1.7). Remove once the
          upstream package bumps its MessagePack dependency past 3.1.7. -->
